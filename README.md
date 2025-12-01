@@ -27,6 +27,11 @@ The project follows a modified Cookiecutter Data Science structure:
 └── requirements.txt # Python dependencies
 ```
 
+### Prerequisites
+*   Python 3.11+
+*   [FFmpeg](https://ffmpeg.org/download.html) installed and added to system PATH (required for video processing).
+*   [uv](https://github.com/astral-sh/uv) (for dependency management).
+
 ## Installation
 
 The project uses [uv](https://github.com/astral-sh/uv) for dependency management.
