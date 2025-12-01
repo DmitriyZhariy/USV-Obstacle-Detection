@@ -1,5 +1,6 @@
 # --- Data & Models ---
-data/
+data/*
+!data/.gitkeep
 *.mp4
 *.avi
 *.mov
@@ -10,7 +11,7 @@ models/*.pt
 models/*.onnx
 weights/
 
-# --- Python ---
+# --- Python & UV ---
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
