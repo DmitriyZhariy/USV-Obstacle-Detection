@@ -1,7 +1,7 @@
 # USV Obstacle Detection and Localization System
 
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![Status](https://img.shields.io/badge/status-research--preview-orange)
 
 ## Overview

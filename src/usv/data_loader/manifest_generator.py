@@ -45,8 +45,13 @@ class VideoManifestGenerator:
         """
         records = []
 
-        # Recursively find all mp4 files
-        files = sorted(list(self.root_dir.rglob("*.mp4")))
+        extensions = ["*.mp4", "*.avi", "*.mov", "*.MP4", "*.AVI", "*.MOV"]
+        files = []
+        for ext in extensions:
+            files.extend(list(self.root_dir.rglob(ext)))
+
+        files = sorted(list(set(files))) # Remove duplicates and sort
+
         print(f"Found {len(files)} video files.")
 
         for f in files:
