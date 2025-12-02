@@ -13,10 +13,8 @@ class SyncPipeline:
         # 16kHz is native for dashcams
         self.aligner = AudioAligner(sample_rate=16000)
 
-        # DERIVED CONSTANTS (From experiment verify_peaks.py)
-        # Audio sync gives ~ -7.81s. Visual sync gives ~ -7.96s.
-        # Difference is Camera Video Encoding Latency.
-        self.HARDWARE_LATENCY = -0.15  # seconds
+        # DERIVED CONSTANTS
+        self.HARDWARE_LATENCY = 0.0 # seconds (Removed manual correction)
 
     def load_manifest(self) -> pd.DataFrame:
         df = pd.read_csv(self.manifest_path)
