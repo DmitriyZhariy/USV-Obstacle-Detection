@@ -77,7 +77,7 @@ class AudioAligner:
         lag_samples = lags[max_idx]
 
         # 5. Convert to seconds (Inverted sign convention)
-        time_offset = -1 * (lag_samples / self.sr)
+        time_offset = 1 * (lag_samples / self.sr)
         max_val = correlation[max_idx]
 
         return time_offset, max_val
