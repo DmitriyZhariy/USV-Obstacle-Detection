@@ -69,6 +69,11 @@ class VisualVerifier:
             # 1. Determine the "Global Start Time" for this segment
             # We want to start checking when ALL valid cameras are ready
 
+            # TEMP
+            leftname = left_row['filename']
+            if leftname != 'MOVI0025.avi':
+                continue
+
             # Find candidate matches
             t_left = left_row['calc_start_time']
             phone_row = self.find_video_covering_time('phone_center', t_left)
@@ -140,4 +145,4 @@ class VisualVerifier:
 
 if __name__ == "__main__":
     verifier = VisualVerifier("reports/synced_manifest.csv")
-    verifier.run_check(limit_seconds=15)
+    verifier.run_check(limit_seconds=60)
