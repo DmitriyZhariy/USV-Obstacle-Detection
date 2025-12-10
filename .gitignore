@@ -10,6 +10,7 @@ data/*
 models/*.pth
 models/*.pt
 models/*.onnx
+models/*/*.pb
 weights/
 
 # --- Python & UV ---
