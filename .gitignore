@@ -6,6 +6,7 @@ data/*
 *.mov
 *.jpg
 *.png
+*.pt
 models/*.pth
 models/*.pt
 models/*.onnx
