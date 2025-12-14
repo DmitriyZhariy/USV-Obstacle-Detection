@@ -99,6 +99,6 @@ if __name__ == "__main__":
     else:
         process_frames_with_mask(
             input_dir="data/interim/labeling_upscaled",
-            output_dir="data/interim/labeling_upscaled_masked",
+            output_dir="data/interim/labeling_upscaled_masked_v4",
             mask_path=MASK_FILE
         )

@@ -62,8 +62,8 @@ if __name__ == "__main__":
     # Пробуем EDSR x4. Если будет слишком медленно/тяжело — поменяй на FSRCNN и scale=3
     # Вход: Оригинальные "labeling_v1" (НЕ enhanced, лучше апскейлить сырое)
     upscale_dataset(
-        input_dir="data/interim/labeling_v3",
-        output_dir="data/interim/labeling_upscaled",
+        input_dir="data/interim/labeling_v4",
+        output_dir="data/interim/labeling_upscaled_v4",
         model="FSRCNN", # Попробуй 'EDSR' (качество) или 'FSRCNN' (скорость)
         scale=3       # Для EDSR есть веса x4, для FSRCNN x3
     )

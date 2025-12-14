@@ -35,8 +35,14 @@ def extract_mixed_frames(
         if not cap.isOpened(): continue
 
         # --- DETECTION LOGIC ---
-        # Определяем, телефон это или нет, по имени папки или файла
-        is_phone = "phone" in str(vid_file).lower() or "center" in str(vid_file).lower()
+        filename_lower = str(vid_file.name).lower()
+
+        if "phone" in filename_lower or "center" in filename_lower:
+            prefix = "center"
+        elif "right" in filename_lower:
+            prefix = "right"
+        else:
+            prefix = "left"
 
         fps = cap.get(cv2.CAP_PROP_FPS)
         if fps <= 0: fps = 30
@@ -50,7 +56,7 @@ def extract_mixed_frames(
             if not ret: break
 
             # --- ROTATION FIX ---
-            if is_phone:
+            if prefix == 'center':
                 # Варианты: ROTATE_90_CLOCKWISE, ROTATE_90_COUNTERCLOCKWISE, ROTATE_180
                 # Если телефон снимал вертикально, обычно нужно CLOCKWISE
                 try:
@@ -60,7 +66,6 @@ def extract_mixed_frames(
 
             # Формируем имя с префиксом, чтобы различать источники
             # left_0001.jpg или phone_0002.jpg
-            prefix = "phone" if is_phone else "left"
             fname = f"{prefix}_{global_idx:05d}.jpg"
 
             cv2.imwrite(str(output_path / fname), frame)
@@ -74,11 +79,12 @@ if __name__ == "__main__":
     # Укажи папки, где лежат сырые видео
     folders = [
         "data/raw/left_cam",
+        "data/raw/right_cam",
         "data/raw/center_phone"
     ]
 
     extract_mixed_frames(
         input_dirs=folders,
-        output_dir="data/interim/labeling_v3",
-        interval_sec=20 # 1 кадр раз в 20 секунд
+        output_dir="data/interim/labeling_v4",
+        interval_sec=1
     )
