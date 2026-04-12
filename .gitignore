@@ -1,0 +1,9 @@
+Data/Lars/
+Data/lars_converted/
+.vscode/
+Prompts.txt
+*.pt
+*.pth
+notebooks/runs/
+runs/
+Video/

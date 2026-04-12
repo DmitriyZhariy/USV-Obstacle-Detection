@@ -1,0 +1,12 @@
+ultralytics 
+torch 
+torchvision 
+opencv-python 
+numpy 
+matplotlib 
+tqdm 
+ipywidgets
+notebook 
+jupyter
+segmentation-models-pytorch
+albumentations
