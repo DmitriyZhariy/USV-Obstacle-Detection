@@ -17,7 +17,9 @@ deeplab = smp.DeepLabV3Plus(
     classes=3
 )
 
-deeplab.load_state_dict(torch.load(r"E:\Education\4 course 2 semester\Practice\panoptic_project\runs\deeplab_semantic_marine\3\deeplab_lars_20.pth", map_location=device))
+deeplab.load_state_dict(torch.load(r"E:\Education\4 course 2 semester\Practice\panoptic_project\runs\deeplab_semantic_marine\3\deeplab_lars_20.pth"))
+
+
 deeplab.to(device)
 deeplab.eval()
 

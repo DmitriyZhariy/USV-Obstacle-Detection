@@ -1,5 +1,5 @@
-Data/Lars/
-Data/lars_converted/
+Data/LaRS/
+Data/LaRS_fusion/
 .vscode/
 Prompts.txt
 *.pt
@@ -7,3 +7,4 @@ Prompts.txt
 notebooks/runs/
 runs/
 Video/
+metrics/

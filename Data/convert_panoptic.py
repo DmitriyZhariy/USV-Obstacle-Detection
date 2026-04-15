@@ -5,8 +5,8 @@ import numpy as np
 from tqdm import tqdm
 import shutil
 
-LARS_ROOT = r"E:\Education\4 course 2 semester\Practice\panoptic_project\Data\Lars"
-OUT_ROOT = r"E:\Education\4 course 2 semester\Practice\panoptic_project\Data\lars_converted"
+LARS_ROOT = r"E:\Education\4 course 2 semester\Practice\panoptic_project\Data\LaRS"
+OUT_ROOT = r"E:\Education\4 course 2 semester\Practice\panoptic_project\Data\LaRS_fusion"
 
 STUFF_CLASSES = {1: 0, 3: 1, 5: 2}
 THING_CLASSES = [11, 12, 13, 14, 15, 16, 17, 19]
@@ -77,8 +77,8 @@ def make_dirs(split):
     paths = [
         f"semantic/{split}/images",
         f"semantic/{split}/masks",
-        f"yolo/{split}/images",
-        f"yolo/{split}/labels",
+        f"instance_yolo/{split}/images",
+        f"instance_yolo/{split}/labels",
     ]
     for p in paths:
         os.makedirs(os.path.join(OUT_ROOT, p), exist_ok=True)
@@ -153,17 +153,17 @@ def process_split(split):
                 line = str(cls_id) + " " + " ".join(flat)
                 yolo_lines.append(line)
 
-        label_path = os.path.join(OUT_ROOT, f"yolo/{split}/labels", file_name.replace(".jpg", ".txt"))
+        label_path = os.path.join(OUT_ROOT, f"instance_yolo/{split}/labels", file_name.replace(".jpg", ".txt"))
 
         with open(label_path, "w") as f:
             f.write("\n".join(yolo_lines))
 
-        shutil.copy(img_path, os.path.join(OUT_ROOT, f"yolo/{split}/images", file_name))
+        shutil.copy(img_path, os.path.join(OUT_ROOT, f"instance_yolo/{split}/images", file_name))
 
 
 def create_yaml():
     yaml_text = f"""
-path: {OUT_ROOT}/yolo
+path: {OUT_ROOT}/instance_yolo
 
 train: train/images
 val: val/images
@@ -178,7 +178,7 @@ names:
   6: float
   7: other
 """
-    with open(os.path.join(OUT_ROOT, "yolo_dataset.yaml"), "w") as f:
+    with open(os.path.join(OUT_ROOT, "instance_yolo_dataset.yaml"), "w") as f:
         f.write(yaml_text)
 
 

@@ -39,7 +39,7 @@ class PanopticNode(Node):
         )
 
         # ---------------- YOLO ----------------
-        self.yolo = YOLO(r"E:\Education\4 course 2 semester\Practice\panoptic_project\runs\yolo_instance_marine\yolo_704\yolo_final\weights\best.pt")
+        self.yolo = YOLO(r"E:\Education\4 course 2 semester\Practice\panoptic_project\runs\yolo_instance_marine\yolo_resized\yolo_40_832\weights\best.pt")
 
         # ---------------- DeepLab ----------------
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -52,7 +52,7 @@ class PanopticNode(Node):
         )
 
         self.deeplab.load_state_dict(
-            torch.load(r"E:\Education\4 course 2 semester\Practice\panoptic_project\runs\deeplab_semantic_marine\1\checkpoints\best.pth", map_location=self.device)
+            torch.load(r"E:\Education\4 course 2 semester\Practice\panoptic_project\runs\deeplab_semantic_marine\3\deeplab_lars_20.pth", map_location=self.device)
         )
 
         self.deeplab.to(self.device)
