@@ -57,9 +57,7 @@ DL_COLORS = {
 INSTANCE_OFFSET = 100
 
 
-# =========================
-# PREPROCESS
-# =========================
+
 
 def preprocess(frame):
     img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -76,9 +74,6 @@ def preprocess(frame):
     return img.to(device)
 
 
-# =========================
-# MAIN APP
-# =========================
 
 class App(QMainWindow):
     def __init__(self):
@@ -213,9 +208,6 @@ class App(QMainWindow):
         self.running = False
 
 
-# =========================
-# RUN
-# =========================
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
