@@ -5,8 +5,10 @@ data/*
 *.avi
 *.mov
 *.jpg
+*.jpeg
 *.png
 *.pt
+*.csv
 models/*.pth
 models/*.pt
 models/*.onnx
