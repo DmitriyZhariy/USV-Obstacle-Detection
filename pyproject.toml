@@ -13,6 +13,9 @@ dependencies = [
     "scipy>=1.16.3",
     "torch>=2.9.1",
     "torchvision>=0.24.1",
+    "transformers>=4.46",
+    "pyyaml>=6.0",
+    "tqdm>=4.66"
 ]
 
 [dependency-groups]
@@ -22,3 +25,8 @@ dev = [
     "pytest>=9.0.1",
     "ruff>=0.14.7",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = ["-v"]
