@@ -1,0 +1,17 @@
+LICENSE
+README.md
+pyproject.toml
+src/USV_Obstacle_Detection.egg-info/PKG-INFO
+src/USV_Obstacle_Detection.egg-info/SOURCES.txt
+src/USV_Obstacle_Detection.egg-info/dependency_links.txt
+src/USV_Obstacle_Detection.egg-info/requires.txt
+src/USV_Obstacle_Detection.egg-info/top_level.txt
+src/usv/__init__.py
+src/usv/auto_annotation/__init__.py
+src/usv/auto_annotation/clip_loader.py
+src/usv/auto_annotation/ontology.py
+src/usv/auto_annotation/types.py
+src/usv/auto_annotation/exporters/__init__.py
+src/usv/auto_annotation/exporters/cvat_xml_exporter.py
+src/usv/auto_annotation/validation/__init__.py
+src/usv/auto_annotation/validation/z_order_test.py

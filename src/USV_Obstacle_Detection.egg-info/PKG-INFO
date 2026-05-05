@@ -1,0 +1,72 @@
+Metadata-Version: 2.4
+Name: USV-Obstacle-Detection
+Version: 0.1.0
+Summary: Add your description here
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: hydra-core>=1.3.2
+Requires-Dist: matplotlib>=3.10.7
+Requires-Dist: numpy>=2.3.5
+Requires-Dist: opencv-python>=4.11.0.86
+Requires-Dist: pandas>=2.3.3
+Requires-Dist: scipy>=1.16.3
+Requires-Dist: torch>=2.9.1
+Requires-Dist: torchvision>=0.24.1
+Requires-Dist: transformers>=4.46
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: tqdm>=4.66
+Dynamic: license-file
+
+# USV Obstacle Detection and Localization System
+
+![License](https://img.shields.io/badge/license-MIT-green)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![Status](https://img.shields.io/badge/status-research--preview-orange)
+
+## Overview
+This repository contains the source code for the Master's Thesis: **"Development of a software module for detection and spatial localization of surface obstacles for an Unmanned Surface Vehicle (USV) based on intelligent multi-sensor data processing."**
+
+The goal is to implement a research-grade pipeline that processes raw data from stereo cameras and sensors (IMU, GPS) to generate a local obstacle map for navigation.
+
+## Repository Structure
+The project follows a modified Cookiecutter Data Science structure:
+
+```text
+├── configs/        # Configuration files (Hydra/YAML)
+├── data/           # Data storage (ignored by Git, keep local)
+│   ├── raw/        # Original video/sensor logs
+│   └── processed/  # Synchronized and rectified data
+├── notebooks/      # Jupyter notebooks for experiments and EDA
+├── src/            # Source code
+│   ├── data/       # Data loaders and parsers
+│   ├── preprocessing/ # Calibration, Synchronization, Rectification
+│   ├── perception/    # Neural networks (Segmentation/Detection)
+│   └── mapping/       # 3D reconstruction and map generation
+├── reports/        # Generated analysis (figures, metrics)
+└── requirements.txt # Python dependencies
+```
+
+## Installation
+
+The project uses [uv](https://github.com/astral-sh/uv) for dependency management.
+
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/YOUR_USERNAME/USV-Obstacle-Detection.git
+    cd USV-Obstacle-Detection
+    ```
+
+2.  **Install uv (if not installed):**
+    *   **Windows:** `powershell -c "irm https://astral.sh/uv/install.ps1 | iex"`
+    *   **macOS/Linux:** `curl -LsSf https://astral.sh/uv/install.sh | sh`
+
+3.  **Sync environment:**
+    This command will install Python 3.11, create a virtual environment, and install all locked dependencies.
+    ```bash
+    uv sync
+    ```
+
+4.  **Activate environment:**
+    *   **Windows:** `.venv\Scripts\activate`
+    *   **macOS/Linux:** `source .venv/bin/activate`
