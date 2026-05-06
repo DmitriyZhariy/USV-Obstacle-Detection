@@ -53,11 +53,11 @@ labels:
     group: void
     z_order: 100
 
-# Model settings
 models:
-  detector: "microsoft/Florence-2-base"
-  segmentor: "facebook/sam2.1-hiera-small"
-  stuff: "nvidia/segformer-b0-finetuned-ade-512-512"
+  sam2_checkpoint: models/sam2.1_hiera_small.pt
+  sam2_config: sam2.1_hiera_small
+  florence2_model: microsoft/Florence-2-base
+  segformer_model: nvidia/segformer-b0-finetuned-ade-512-512
 
 # Pipeline thresholds
 inference_resize: 640 # long-side resize before Florence-2

@@ -11,10 +11,12 @@ import numpy as np
 import yaml
 import os
 
+from usv.auto_annotation.detectors.base import DetectorBase
+
 logger = logging.getLogger(__name__)
 
 
-class YOLOv8Detector:
+class YOLOv8Detector(DetectorBase):
     """
     Wraps ultralytics YOLOv8n-seg for frame-level thing detection.
 

@@ -13,6 +13,8 @@ import numpy as np
 from usv.auto_annotation.types import TrackAnnotation, PolygonKeyframe
 from usv.auto_annotation.postprocess.mask_utils import bbox_iou, mask_to_polygon
 
+from usv.auto_annotation.tracker.base import TrackerBase
+
 logger = logging.getLogger(__name__)
 
 _IOU_THRESHOLD = 0.4
@@ -29,8 +31,7 @@ class _ActiveTrack:
     keyframes: list[PolygonKeyframe] = field(default_factory=list)
     missed_frames: int = 0
 
-
-class IoUTracker:
+class IoUTracker(TrackerBase):
     """
     Greedy IoU tracker: links per-frame detections into TrackAnnotation objects.
 
@@ -72,7 +73,7 @@ class IoUTracker:
         x1, y1, x2, y2 = det["bbox_xyxy"]
         return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
 
-    def update(self, frame_idx: int, detections: list[dict]) -> None:
+    def update(self, frame_idx: int, frame: "np.ndarray", detections: list[dict]) -> None:
         """Process one frame of detections, updating active tracks in place."""
 
         # Seed frame or empty active list — all detections start new tracks
