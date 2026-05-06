@@ -124,6 +124,7 @@ class AutoAnnotationRunner:
             outside_area_threshold=int(self.cfg.get("outside_area_threshold", 100)),
             polygon_epsilon_ratio=float(self.cfg.get("polygon_epsilon_ratio", 0.005)),
             min_instance_area=int(self.cfg.get("min_instance_area", 64)),
+            max_age=int(self.cfg.get("tracker_max_age", 3)),
         )
 
         for frame_idx, frame_bgr in enumerate(clip_data.frames):

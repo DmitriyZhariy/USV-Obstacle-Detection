@@ -27,6 +27,7 @@ class _ActiveTrack:
     last_bbox: tuple[float, float, float, float]
     last_frame_idx: int
     keyframes: list[PolygonKeyframe] = field(default_factory=list)
+    missed_frames: int = 0
 
 
 class IoUTracker:
@@ -46,6 +47,7 @@ class IoUTracker:
         outside_area_threshold: int = _OUTSIDE_AREA_THRESHOLD,
         polygon_epsilon_ratio: float = 0.005,
         min_instance_area: int = 64,
+        max_age: int = 3,
     ) -> None:
         self._iou_threshold = iou_threshold
         self._outside_area = outside_area_threshold
@@ -54,6 +56,7 @@ class IoUTracker:
         self._next_id: int = 1
         self._active: list[_ActiveTrack] = []
         self._finished: list[TrackAnnotation] = []
+        self._max_age = max_age
 
     def _make_polygon(self, det: dict) -> list[tuple[float, float]] | None:
         mask: np.ndarray | None = det.get("mask")
@@ -125,25 +128,29 @@ class IoUTracker:
             track.last_bbox = det["bbox_xyxy"]
             track.last_frame_idx = frame_idx
 
-        # Unmatched active tracks - outside=True on last polygon, then retire.
+        # Unmatched active tracks - increment missed counter; retire only after max_age.
         still_active: list[_ActiveTrack] = []
         for ti, track in enumerate(self._active):
             if ti not in matched_tracks:
-                if track.keyframes:
-                    last_pts = track.keyframes[-1].points
-                    track.keyframes.append(PolygonKeyframe(
-                        frame_idx=frame_idx,
-                        points=last_pts,
-                        keyframe=True,
-                        outside=True,
+                track.missed_frames += 1
+                if track.missed_frames > self._max_age:
+                    if track.keyframes:
+                        track.keyframes.append(PolygonKeyframe(
+                            frame_idx=frame_idx,
+                            points=track.keyframes[-1].points,
+                            keyframe=True,
+                            outside=True,
+                        ))
+                    self._finished.append(TrackAnnotation(
+                        track_id=track.track_id,
+                        label=track.label,
+                        z_order=track.z_order,
+                        keyframes=track.keyframes,
                     ))
-                self._finished.append(TrackAnnotation(
-                    track_id=track.track_id,
-                    label=track.label,
-                    z_order=track.z_order,
-                    keyframes=track.keyframes,
-                ))
+                else:
+                    still_active.append(track)  # keep alive during grace period
             else:
+                track.missed_frames = 0         # reset on successful match
                 still_active.append(track)
 
         # New tracks from unmatched detections
