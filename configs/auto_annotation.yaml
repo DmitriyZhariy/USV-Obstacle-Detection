@@ -55,7 +55,7 @@ labels:
 
 models:
   sam2_checkpoint: models/sam2.1_hiera_small.pt
-  sam2_config: sam2.1_hiera_small
+  sam2_config: configs/sam2.1/sam2.1_hiera_small
   florence2_model: microsoft/Florence-2-base
   segformer_model: nvidia/segformer-b0-finetuned-ade-512-512
 

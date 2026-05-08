@@ -99,6 +99,7 @@ class Florence2Detector(DetectorBase):
             model_name,
             trust_remote_code=True,
             torch_dtype="auto",
+            attn_implementation="eager",
         )
         self._model.eval()
         self._model.to("cpu")

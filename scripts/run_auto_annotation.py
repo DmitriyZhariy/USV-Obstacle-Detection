@@ -241,6 +241,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--no-skip-existing", action="store_false", dest="skip_existing")
     p.add_argument("--debug-vis", action="store_true",
                    help="Save detection overlay JPEGs to output-dir/debug/.")
+    p.add_argument("--sam2-checkpoint", default=None)
+    p.add_argument("--inference-resize", default=640, type=int)
+    p.add_argument("--keyframe-iou-threshold", default=0.85, type=float)
     return p.parse_args()
 
 
