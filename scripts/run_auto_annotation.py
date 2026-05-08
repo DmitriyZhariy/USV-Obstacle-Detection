@@ -1,13 +1,13 @@
 """
-CLI entry point for the auto-annotation pipeline (Phase 1: cpu-fast mode).
+CLI entry point for the auto-annotation pipeline.
 
-Usage — single clip:
+Usage - single clip:
     python -m scripts.run_auto_annotation `
         --config configs/auto_annotation.yaml `
         --mode cpu-fast `
         --clip-name left_MOVI0017_0001
 
-Usage — all clips, skip existing:
+Usage - all clips, skip existing:
     python -m scripts.run_auto_annotation `
         --config configs/auto_annotation.yaml `
         --mode cpu-fast `
@@ -49,10 +49,32 @@ class AutoAnnotationRunner:
 
         if self.mode == "cpu-fast":
             self._init_cpu_fast()
-        else:
-            raise NotImplementedError(
-                f"--mode {self.mode} is not yet implemented."
-            )
+        elif self.mode == "cpu-sam2":
+            self._init_cpu_sam2()
+        # else:
+        #     raise NotImplementedError(
+        #         f"--mode {self.mode} is not yet implemented."
+        #     )
+
+    def _init_cpu_sam2(self) -> None:
+        from usv.auto_annotation.pipeline import AutoAnnotationPipeline
+
+        sam2_ckpt = Path(
+            self.args.sam2_checkpoint
+            if self.args.sam2_checkpoint
+            else "models/sam2.1_hiera_small.pt"
+        )
+        self._pipeline = AutoAnnotationPipeline(
+            config_path=self.config_path,
+            output_dir=self.output_dir,
+            inference_resize=int(self.args.inference_resize),
+            keyframe_iou_thresh=float(self.args.keyframe_iou_threshold),
+            outside_area_thresh=int(self.cfg.get("outside_area_threshold", 100)),
+            sam2_checkpoint=sam2_ckpt,
+            skip_existing=self.skip_existing,
+            debug_vis=self.debug_vis,
+        )
+        logger.info("cpu-sam2 mode: Florence-2 + SAM2 + SegFormer-B0")
 
     def _init_cpu_fast(self) -> None:
         from usv.auto_annotation.detectors.yolov8_detector import YOLOv8Detector
@@ -95,7 +117,7 @@ class AutoAnnotationRunner:
         logger.info("Clips to process: %d", len(clips))
         for name in clips:
             if self._should_skip(name):
-                logger.info("[SKIP] %s — output zip already exists", name)
+                logger.info("[SKIP] %s - output zip already exists", name)
                 continue
             try:
                 self._run_one(name)
@@ -104,7 +126,6 @@ class AutoAnnotationRunner:
 
     def _run_one(self, clip_name: str) -> None:
         from usv.auto_annotation.clip_loader import ClipLoader
-        from usv.auto_annotation.exporters.cvat_xml_exporter import export_clip
 
         t0 = time.perf_counter()
         logger.info("[START] %s  mode=%s", clip_name, self.mode)
@@ -119,6 +140,14 @@ class AutoAnnotationRunner:
             clip_data.frame_height,
         )
 
+        if self.mode == "cpu-fast":
+            self._run_one_cpu_fast(clip_name, clip_data, t0)
+        elif self.mode == "cpu-sam2":
+            self._pipeline.run_clip(clip_data)
+
+    def _run_one_cpu_fast(self, clip_name: str, clip_data, t0: float) -> None:
+        """cpu-fast path - YOLOv8 + IoU tracker. Extracted from _run_one."""
+        from usv.auto_annotation.exporters.cvat_xml_exporter import export_clip
         tracker = self._tracker_cls(
             iou_threshold=0.4,
             outside_area_threshold=int(self.cfg.get("outside_area_threshold", 100)),
@@ -131,7 +160,7 @@ class AutoAnnotationRunner:
             dets = self._detector.detect(frame_bgr)
             tracker.update(frame_idx, dets)
             logger.debug(
-                "  frame %02d/%02d — %d detection(s)",
+                "  frame %02d/%02d - %d detection(s)",
                 frame_idx + 1, clip_data.n_frames, len(dets),
             )
             if self.debug_vis:
@@ -143,7 +172,7 @@ class AutoAnnotationRunner:
         if not tracks:
             logger.warning(
                 "  [WARN] No tracks produced for %s. "
-                "Check coco_mapping in config — YOLOv8 may not detect any mapped class.",
+                "Check coco_mapping in config - YOLOv8 may not detect any mapped class.",
                 clip_name,
             )
             return
