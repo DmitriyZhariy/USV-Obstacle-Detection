@@ -98,9 +98,8 @@ class Florence2Detector(DetectorBase):
         self._model = AutoModelForCausalLM.from_pretrained(
             model_name,
             trust_remote_code=True,
-            torch_dtype="auto",
             attn_implementation="eager",
-        )
+        ).float() # force fp32 — "auto" picks fp16 on CPU, which breaks conv ops
         self._model.eval()
         self._model.to("cpu")
         self._torch = torch
@@ -188,7 +187,6 @@ class Florence2Detector(DetectorBase):
                 input_ids=inputs["input_ids"],
                 pixel_values=inputs["pixel_values"],
                 max_new_tokens=1024,
-                num_beams=3,
                 do_sample=False,
             )
 

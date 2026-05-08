@@ -79,7 +79,7 @@ class SAM2Tracker(TrackerBase):
         Path to sam2.1_hiera_small.pt checkpoint.
     model_cfg : str
         Config name passed to build_sam2(). Must match the checkpoint.
-        E.g. "sam2.1_hiera_small"  - do NOT pass a file path.
+        E.g. "configs/sam2.1/sam2.1_hiera_s"  - do NOT pass a file path.
     keyframe_iou_thresh : float
         IoU drop threshold below which a propagated frame is marked
         keyframe=True and the reference mask is updated. Default 0.85.
@@ -91,7 +91,7 @@ class SAM2Tracker(TrackerBase):
     def __init__(
         self,
         checkpoint: Path | str,
-        model_cfg: str = "sam2.1_hiera_small",
+        model_cfg: str = "configs/sam2.1/sam2.1_hiera_s",
         keyframe_iou_thresh: float = _DEFAULT_KEYFRAME_IOU_THRESH,
         outside_area_thresh: int = _DEFAULT_OUTSIDE_AREA_THRESH,
     ) -> None:

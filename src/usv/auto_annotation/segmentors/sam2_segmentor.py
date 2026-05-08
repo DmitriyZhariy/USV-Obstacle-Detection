@@ -41,7 +41,7 @@ class SAM2Segmentor(InstanceSegmentorBase):
     def __init__(
         self,
         checkpoint: Path | str,
-        model_cfg: str = "sam2.1_hiera_small",
+        model_cfg: str = "configs/sam2.1/sam2.1_hiera_s",
     ) -> None:
         """
         Parameters
