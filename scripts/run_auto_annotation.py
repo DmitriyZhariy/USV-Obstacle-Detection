@@ -51,10 +51,10 @@ class AutoAnnotationRunner:
             self._init_cpu_fast()
         elif self.mode == "cpu-sam2":
             self._init_cpu_sam2()
-        # else:
-        #     raise NotImplementedError(
-        #         f"--mode {self.mode} is not yet implemented."
-        #     )
+        else:
+            raise NotImplementedError(
+                f"--mode {self.mode} is not yet implemented."
+            )
 
     def _init_cpu_sam2(self) -> None:
         from usv.auto_annotation.pipeline import AutoAnnotationPipeline
@@ -69,7 +69,7 @@ class AutoAnnotationRunner:
             output_dir=self.output_dir,
             inference_resize=int(self.args.inference_resize),
             keyframe_iou_thresh=float(self.args.keyframe_iou_threshold),
-            outside_area_thresh=int(self.cfg.get("outside_area_threshold", 100)),
+            outside_area_thresh=int(self.args.outside_area_threshold),
             sam2_checkpoint=sam2_ckpt,
             skip_existing=self.skip_existing,
             debug_vis=self.debug_vis,
@@ -82,7 +82,7 @@ class AutoAnnotationRunner:
 
         # Resolve model path: CLI arg - repo root - error
         if self.args.model_path:
-            model_path = "models/" / Path(self.args.model_path)
+            model_path = Path("models") / self.args.model_path
         else:
             model_path = Path(__file__).resolve().parent.parent / "models/yolov8n-seg.pt"
 
@@ -158,7 +158,7 @@ class AutoAnnotationRunner:
 
         for frame_idx, frame_bgr in enumerate(clip_data.frames):
             dets = self._detector.detect(frame_bgr)
-            tracker.update(frame_idx, dets)
+            tracker.update(frame_idx, frame_bgr, dets)
             logger.debug(
                 "  frame %02d/%02d - %d detection(s)",
                 frame_idx + 1, clip_data.n_frames, len(dets),
@@ -244,6 +244,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--sam2-checkpoint", default=None)
     p.add_argument("--inference-resize", default=640, type=int)
     p.add_argument("--keyframe-iou-threshold", default=0.85, type=float)
+    p.add_argument("--outside-area-threshold", default=100, type=int)
     return p.parse_args()
 
 

@@ -176,7 +176,7 @@ class Florence2Detector(DetectorBase):
         pil_img = _PIL_Image.fromarray(resized_rgb)
 
         inputs = self._processor(
-            text=self._task_token,
+            text=f"<CAPTION_TO_PHRASE_GROUNDING> {self._prompt}",
             images=pil_img,
             return_tensors="pt",
         )
@@ -188,6 +188,7 @@ class Florence2Detector(DetectorBase):
                 pixel_values=inputs["pixel_values"],
                 max_new_tokens=1024,
                 do_sample=False,
+                use_cache=False,
             )
 
         generated_text = self._processor.batch_decode(
@@ -197,12 +198,12 @@ class Florence2Detector(DetectorBase):
         # Post-process: parse Florence-2 structured output
         parsed = self._processor.post_process_generation(
             generated_text,
-            task=self._task_token,
+            task="<CAPTION_TO_PHRASE_GROUNDING>",
             image_size=(pil_img.width, pil_img.height),
         )
 
-        # parsed[<OD>] = {"bboxes": [[x1,y1,x2,y2], ...], "labels": ["...", ...]}
-        od_result = parsed.get(self._task_token, {})
+        # parsed[<CAPTION_TO_PHRASE_GROUNDING>] = {"bboxes": [[x1,y1,x2,y2], ...], "labels": ["...", ...]}
+        od_result = parsed.get("<CAPTION_TO_PHRASE_GROUNDING>", {})
         raw_bboxes: list[list[float]] = od_result.get("bboxes", [])
         raw_labels: list[str] = od_result.get("labels", [])
 

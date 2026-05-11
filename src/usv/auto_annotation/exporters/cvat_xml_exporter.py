@@ -68,6 +68,11 @@ def build_xml(
                 f"Track {track.track_id} ({track.label}) has no frame "
                 f"with keyframe=True. CVAT requires at least one keyframe per track."
             )
+        if not any(not kf.outside for kf in track.keyframes):
+            raise ValueError(
+                f"Track {track.track_id} ({track.label}) has no visible (non-outside) "
+                f"keyframe. CVAT requires at least one visible keyframe per track."
+            )
 
     # Root
     root = ET.Element("annotations")

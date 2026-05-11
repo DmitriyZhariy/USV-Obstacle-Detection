@@ -41,7 +41,7 @@ class SAM2Segmentor(InstanceSegmentorBase):
     def __init__(
         self,
         checkpoint: Path | str,
-        model_cfg: str = "configs/sam2.1/sam2.1_hiera_s",
+        model_cfg: str = "sam2.1_hiera_s",
     ) -> None:
         """
         Parameters
@@ -53,18 +53,30 @@ class SAM2Segmentor(InstanceSegmentorBase):
             Must match the checkpoint variant. Do not pass a filesystem path —
             the sam2 package resolves bundled YAML configs by name internally.
         """
+        import os
+        import torch
+        import sam2
         from sam2.build_sam import build_sam2
         from sam2.sam2_image_predictor import SAM2ImagePredictor
-        import torch
+        from hydra import initialize_config_dir
+        from hydra.core.global_hydra import GlobalHydra
 
         logger.info(
             "SAM2Segmentor: loading %s from %s (CPU) ...", model_cfg, checkpoint
         )
+
+        sam2_cfg_dir = os.path.join(os.path.dirname(sam2.__file__), "configs", "sam2.1")
+        GlobalHydra.instance().clear()
+        initialize_config_dir(config_dir=sam2_cfg_dir, job_name="sam2", version_base=None)
+
         sam2_model = build_sam2(
-            model_cfg,
-            str(checkpoint),
+            config_file=model_cfg,
+            ckpt_path=str(checkpoint),
             device="cpu",
+            apply_postprocessing=False,
         )
+        GlobalHydra.instance().clear()
+
         self._predictor = SAM2ImagePredictor(sam2_model)
         self._torch = torch
         logger.info("SAM2Segmentor: ready.")

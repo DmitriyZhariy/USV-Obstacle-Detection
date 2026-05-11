@@ -79,7 +79,7 @@ class SAM2Tracker(TrackerBase):
         Path to sam2.1_hiera_small.pt checkpoint.
     model_cfg : str
         Config name passed to build_sam2(). Must match the checkpoint.
-        E.g. "configs/sam2.1/sam2.1_hiera_s"  - do NOT pass a file path.
+        E.g. "sam2.1_hiera_s"  - do NOT pass a file path.
     keyframe_iou_thresh : float
         IoU drop threshold below which a propagated frame is marked
         keyframe=True and the reference mask is updated. Default 0.85.
@@ -91,21 +91,35 @@ class SAM2Tracker(TrackerBase):
     def __init__(
         self,
         checkpoint: Path | str,
-        model_cfg: str = "configs/sam2.1/sam2.1_hiera_s",
+        model_cfg: str = "sam2.1_hiera_s",
         keyframe_iou_thresh: float = _DEFAULT_KEYFRAME_IOU_THRESH,
         outside_area_thresh: int = _DEFAULT_OUTSIDE_AREA_THRESH,
     ) -> None:
         from sam2.build_sam import build_sam2_video_predictor
         import torch
 
+        import os
+        import sam2
+        from hydra import initialize_config_dir
+        from hydra.core.global_hydra import GlobalHydra
+
         logger.info(
             "SAM2Tracker: loading %s from %s (CPU) ...", model_cfg, checkpoint
         )
+
+        # Point Hydra directly at the sam2 package directory where YAMLs live
+        sam2_cfg_dir = os.path.join(os.path.dirname(sam2.__file__), "configs", "sam2.1")
+        GlobalHydra.instance().clear()
+        initialize_config_dir(config_dir=sam2_cfg_dir, job_name="sam2", version_base=None)
+
         self._predictor = build_sam2_video_predictor(
-            model_cfg,
-            str(checkpoint),
+            config_file=model_cfg,
+            ckpt_path=str(checkpoint),
             device="cpu",
+            apply_postprocessing=False,
         )
+        GlobalHydra.instance().clear()
+
         self._torch = torch
         self._keyframe_iou_thresh = keyframe_iou_thresh
         self._outside_area_thresh = outside_area_thresh
@@ -226,23 +240,24 @@ class SAM2Tracker(TrackerBase):
             "SAM2Tracker: initialising inference state (%d frames) ...",
             n_frames,
         )
+
         with torch.inference_mode():
+            # Stage A: build state
             inference_state = self._predictor.init_state(
                 video_path=str(frame_dir),
-                offload_video_to_cpu=True,   # mandatory for CPU-only machines
+                offload_video_to_cpu=True,
                 offload_state_to_cpu=True,
                 async_loading_frames=False,
             )
 
-        # Register keyframe masks for all instances
-        logger.info(
-            "SAM2Tracker: registering %d keyframe masks at frame %d ...",
-            len(self._instance_masks), self._keyframe_idx,
-        )
-        with torch.inference_mode():
+            # Stage B: register keyframe masks
+            logger.info(
+                "SAM2Tracker: registering %d keyframe masks at frame %d ...",
+                len(self._instance_masks), self._keyframe_idx,
+            )
             for inst in self._instance_masks:
                 obj_id: int = inst["track_id"]
-                mask: np.ndarray = inst["mask"]   # H×W uint8 binary
+                mask: np.ndarray = inst["mask"]
                 self._predictor.add_new_mask(
                     inference_state=inference_state,
                     frame_idx=self._keyframe_idx,
@@ -250,24 +265,19 @@ class SAM2Tracker(TrackerBase):
                     mask=mask.astype(bool),
                 )
 
-        # Build per-object accumulators
-        # meta[obj_id] = {label, z_order}
-        meta: dict[int, dict] = {
-            inst["track_id"]: {
-                "label":   inst["label"],
-                "z_order": inst["z_order"],
+            # Stage C: forward propagation
+            logger.info("SAM2Tracker: propagating forward ...")
+            meta: dict[int, dict] = {
+                inst["track_id"]: {
+                    "label":   inst["label"],
+                    "z_order": inst["z_order"],
+                }
+                for inst in self._instance_masks
             }
-            for inst in self._instance_masks
-        }
+            raw_frames: dict[int, dict[int, np.ndarray]] = {
+                obj_id: {} for obj_id in meta
+            }
 
-        # raw_frames[obj_id][frame_idx] = H×W uint8 mask
-        raw_frames: dict[int, dict[int, np.ndarray]] = {
-            obj_id: {} for obj_id in meta
-        }
-
-        # Forward propagation
-        logger.info("SAM2Tracker: propagating forward ...")
-        with torch.inference_mode():
             propagation_iter = self._predictor.propagate_in_video(
                 inference_state,
                 start_frame_idx=0,
@@ -280,20 +290,17 @@ class SAM2Tracker(TrackerBase):
                 desc="SAM2 propagation",
                 unit="frame",
             ):
-                # mask_logits : (N_obj, 1, H, W) float32
-                # Threshold at 0 to get binary mask (SAM 2 convention)
-                binary_masks = (mask_logits > 0.0).squeeze(1).cpu().numpy()
-                # binary_masks : (N_obj, H, W) bool
+                binary_masks = (mask_logits > 0.0).squeeze(1).cpu().float().numpy()
                 for i, obj_id in enumerate(obj_ids):
                     if obj_id in raw_frames:
                         raw_frames[obj_id][frame_idx] = (
                             binary_masks[i].astype(np.uint8)
                         )
 
-        # Reset SAM 2 state to free CPU memory before polygon conversion
+        # Reset after exiting inference_mode (reset_state is safe outside)
         self._predictor.reset_state(inference_state)
 
-        # Keyframe detection + outside detection + polygon build
+        # Polygon conversion + TrackAnnotation build
         track_annotations: list[TrackAnnotation] = []
 
         for obj_id, frame_mask_map in raw_frames.items():
@@ -303,11 +310,9 @@ class SAM2Tracker(TrackerBase):
                     obj_id,
                 )
                 continue
-
             keyframes = self._build_keyframes(obj_id, frame_mask_map)
             if not keyframes:
                 continue
-
             track_annotations.append(
                 TrackAnnotation(
                     track_id=obj_id,
@@ -345,32 +350,40 @@ class SAM2Tracker(TrackerBase):
             mask = frame_mask_map[frame_idx]
             area = mask_area(mask)
 
-            # Outside / retired
             if area < self._outside_area_thresh:
+                # only emit outside kf if the object was visible before
+                if last_kf_mask is None:
+                    # Never had a single visible frame - discard entirely.
+                    # Emitting a track that starts with outside=True is invalid
+                    # in CVAT: every track must have at least one non-outside kf.
+                    logger.debug(
+                        "SAM2Tracker: obj_id=%d discarded — "
+                        "first propagated frame (idx=%d) already outside "
+                        "(area=%d px^2 < threshold=%d px^2).",
+                        obj_id, frame_idx, area, self._outside_area_thresh,
+                    )
+                    return []   # caller skips this track entirely
+
+                # Object was visible before — safe to close the track with outside=True
                 polygon = self._safe_polygon(mask, frame_idx, obj_id)
                 keyframe_list.append(
                     PolygonKeyframe(
                         frame_idx=frame_idx,
                         points=polygon,
-                        keyframe=True,   # outside frames are always keyframes
+                        keyframe=True,
                         outside=True,
                         occluded=False,
                     )
                 )
                 logger.debug(
                     "SAM2Tracker: obj_id=%d retired at frame %d "
-                    "(area=%d px^2 < threshold=%d px^2)",
+                    "(area=%d px^2 < threshold=%d px^2).",
                     obj_id, frame_idx, area, self._outside_area_thresh,
                 )
-                break  # retire: no further frames for this track
+                break
 
             is_first = (last_kf_mask is None)
-
-            if is_first:
-                is_keyframe = True
-            else:
-                iou = mask_iou(mask, last_kf_mask)
-                is_keyframe = iou < self._keyframe_iou_thresh
+            is_keyframe = is_first or (mask_iou(mask, last_kf_mask) < self._keyframe_iou_thresh)
 
             if is_keyframe:
                 polygon = self._safe_polygon(mask, frame_idx, obj_id)
@@ -383,9 +396,7 @@ class SAM2Tracker(TrackerBase):
                         occluded=False,
                     )
                 )
-                last_kf_mask = mask   # update reference mask
-
-            # Non-keyframe frames: skip - CVAT interpolates between keyframes
+                last_kf_mask = mask
 
         return keyframe_list
 
@@ -400,7 +411,7 @@ class SAM2Tracker(TrackerBase):
         if mask_to_polygon() returns fewer than 3 points (degenerate shape).
         """
         polygon = mask_to_polygon(mask)
-        if len(polygon) >= 3:
+        if polygon is not None and len(polygon) >= 3:
             return polygon
 
         # Fallback: bounding box from mask extent

@@ -57,7 +57,7 @@ from usv.auto_annotation.types import ClipData, TrackAnnotation
 logger = logging.getLogger(__name__)
 
 _SAM2_CHECKPOINT_DEFAULT = "models/sam2.1_hiera_small.pt"
-_SAM2_MODEL_CFG          = "configs/sam2.1/sam2.1_hiera_s"
+_SAM2_MODEL_CFG          = "sam2.1_hiera_s"
 _FLORENCE2_MODEL         = "microsoft/Florence-2-base"
 _SEGFORMER_MODEL         = "nvidia/segformer-b0-finetuned-ade-512-512"
 
@@ -421,7 +421,7 @@ class AutoAnnotationPipeline:
         Stage 5: SegFormerStuff on all frames.
         Returns list of H×W uint8 project class_id maps.
         """
-        return self._stuff_segmentor.segment_clip(clip_data.frames)
+        return [self._stuff_segmentor.segment_frame(f) for f in clip_data.frames]
 
     def _stage7_resolve(
         self,

@@ -68,6 +68,8 @@ from typing import Any
 
 import numpy as np
 
+from usv.auto_annotation.stuff.ade20k_mapping import ADE20K_TO_PROJECT
+
 from usv.auto_annotation.types import PolygonKeyframe, TrackAnnotation
 from usv.auto_annotation.postprocess.mask_utils import (
     mask_area,
@@ -271,10 +273,11 @@ def _build_stuff_tracks(
     Track IDs start at STUFF_TRACK_ID_START to avoid collisions.
     """
     # Build class_id - (label_name, z_order) from config
-    id_to_label: dict[int, tuple[str, int]] = {
+    mapped_class_ids = {cid for _, cid, _ in ADE20K_TO_PROJECT.values()}
+    id_to_label = {
         lbl["id"]: (lbl["name"], lbl["z_order"])
         for lbl in config["labels"]
-        if lbl.get("group") == "stuff"
+        if lbl.get("group") == "stuff" and lbl["id"] in mapped_class_ids
     }
 
     if not id_to_label:
