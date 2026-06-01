@@ -119,6 +119,8 @@ class SAM2Tracker(TrackerBase):
             apply_postprocessing=False,
         )
         GlobalHydra.instance().clear()
+        
+        _patch_predictor_for_cpu_fp32(self._predictor)
 
         self._torch = torch
         self._keyframe_iou_thresh = keyframe_iou_thresh
@@ -432,3 +434,74 @@ class SAM2Tracker(TrackerBase):
             obj_id, frame_idx,
         )
         return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+    
+
+def _patch_predictor_for_cpu_fp32(predictor) -> None:
+    """
+    Patch SAM2's _prepare_memory_conditioned_features to cast maskmem_features
+    to float32 at the READ site, immediately before they enter memory_attention.
+
+    Root cause
+    ----------
+    sam2_video_predictor.py unconditionally casts maskmem_features to bfloat16
+    when storing them into the internal output_dict (lines 781 & 833).
+    On CPU inference the model weights stay float32, so feeding bf16 features
+    into memory_attention raises:
+        RuntimeError: mat1 and mat2 must have the same dtype, got BFloat16 and Float
+
+    Why patching _run_single_frame_inference (return value) doesn't work
+    ---------------------------------------------------------------------
+    That method returns compact_out for the CALLER's storage, but internally
+    it also writes into output_dict BEFORE assembling compact_out.
+    _prepare_memory_conditioned_features reads from output_dict, so by the
+    time our return-value patch fires, the bf16 features are already cached
+    inside the model state and will be read back as bf16 on the next frame.
+
+    Fix
+    ---
+    Patch _prepare_memory_conditioned_features directly on the model (sam2_base)
+    to cast maskmem_features to the compute dtype (float32) at the point where
+    they are loaded from the cache: the `.to(device)` call on line 575.
+    This is the single chokepoint all stored features pass through before
+    entering memory_attention, regardless of which code path wrote them.
+    """
+    import torch
+    import types
+
+    model = predictor.model if hasattr(predictor, "model") else predictor
+
+    original_pmcf = model._prepare_memory_conditioned_features.__func__
+
+    def _patched_pmcf(self_inner, *args, **kwargs):
+        # Temporarily monkey-patch the stored maskmem_features in every cached
+        # output to be float32 before the original method reads them.
+        # We do this by wrapping the dict __getitem__ — but that is fragile.
+        # Instead: run the original, catch the dtype error, and re-run after
+        # casting all cached features. Simpler: just cast before calling.
+        #
+        # The cleanest approach: patch at the exact line that does
+        #   feats = prev["maskmem_features"].to(device, non_blocking=True)
+        # by casting all prev["maskmem_features"] in the output_dicts to f32
+        # before the original function iterates over them.
+        #
+        # output_dict is passed as a kwarg or positional arg — find it.
+        output_dict = kwargs.get("output_dict") or (args[3] if len(args) > 3 else None)
+        if output_dict is not None:
+            for storage_key in ("cond_frame_outputs", "non_cond_frame_outputs"):
+                for frame_out in output_dict.get(storage_key, {}).values():
+                    if (
+                        isinstance(frame_out, dict)
+                        and frame_out.get("maskmem_features") is not None
+                    ):
+                        frame_out["maskmem_features"] = frame_out[
+                            "maskmem_features"
+                        ].to(torch.float32)
+        return original_pmcf(self_inner, *args, **kwargs)
+
+    model._prepare_memory_conditioned_features = types.MethodType(
+        _patched_pmcf, model
+    )
+    logger.debug(
+        "SAM2Tracker: bfloat16→float32 patch applied to "
+        "_prepare_memory_conditioned_features."
+    )
