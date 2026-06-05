@@ -293,7 +293,8 @@ class SAM2Tracker(TrackerBase):
                 unit="frame",
             ):
                 binary_masks = (mask_logits > 0.0).squeeze(1).cpu().float().numpy()
-                for i, obj_id in enumerate(obj_ids):
+                obj_ids_list = obj_ids.tolist() if hasattr(obj_ids, "tolist") else list(obj_ids)
+                for i, obj_id in enumerate(obj_ids_list):
                     if obj_id in raw_frames:
                         raw_frames[obj_id][frame_idx] = (
                             binary_masks[i].astype(np.uint8)

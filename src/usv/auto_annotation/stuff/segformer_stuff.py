@@ -23,8 +23,10 @@ the map is unambiguous even when two labels share a z_order (Pier/Bridge).
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 
 import numpy as np
+import cv2
 
 from usv.auto_annotation.stuff.base import StuffSegmentorBase
 from usv.auto_annotation.stuff.ade20k_mapping import get_project_label
@@ -44,7 +46,11 @@ class SegFormerStuff(StuffSegmentorBase):
     CPU inference only. Model loaded once at construction, reused per frame.
     """
 
-    def __init__(self, model_name: str = _DEFAULT_MODEL) -> None:
+    def __init__(
+            self, 
+            model_name: str = _DEFAULT_MODEL,
+            morph_kernel_size: int = 15,
+            ) -> None:
         from transformers import (
             SegformerImageProcessor,
             SegformerForSemanticSegmentation,
@@ -59,6 +65,37 @@ class SegFormerStuff(StuffSegmentorBase):
         self._torch = torch
         logger.info("SegFormerStuff: ready.")
 
+        self._morph_kernel_size = morph_kernel_size
+        if morph_kernel_size > 0:
+            k = morph_kernel_size
+            self._morph_kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (k, k)
+            )
+        else:
+            self._morph_kernel = None
+        logger.info(
+            "SegFormerStuff: morph_kernel_size=%d (%s)",
+            morph_kernel_size,
+            "ellipse" if morph_kernel_size > 0 else "disabled",
+        )
+
+    def _apply_morphology(self, binary_mask: np.ndarray) -> np.ndarray:
+        """
+        CLOSE → OPEN на бинарной маске одного класса.
+        CLOSE: закрывает дырки внутри региона.
+        OPEN:  убирает шумовые острова вне региона.
+        Работает in-place через временный буфер.
+        """
+        if self._morph_kernel is None:
+            return binary_mask
+        closed = cv2.morphologyEx(
+            binary_mask, cv2.MORPH_CLOSE, self._morph_kernel
+        )
+        opened = cv2.morphologyEx(
+            closed, cv2.MORPH_OPEN, self._morph_kernel
+        )
+        return opened
+    
     def segment_frame(self, frame: np.ndarray) -> np.ndarray:
         """
         Segment one BGR frame into a project class_id map.
@@ -102,14 +139,27 @@ class SegFormerStuff(StuffSegmentorBase):
         # Build output filled with 255 (unmapped sentinel)
         project_map = np.full((h, w), 255, dtype=np.uint8)
 
+        class_id_to_mask: dict[int, np.ndarray] = defaultdict(
+            lambda: np.zeros((h, w), dtype=np.uint8)
+        )
+
         for ade_id in np.unique(ade20k_map):
             result = get_project_label(int(ade_id))
             if result is None:
-                continue  # ADE20K class not in USV ontology — leave as 255
-
+                continue
             _label, class_id, _z_order = result
-            # Store class_id — unique per label, unambiguous even for
-            # Pier/Bridge which share z_order=10
-            project_map[ade20k_map == ade_id] = class_id
+            class_id_to_mask[class_id] |= (ade20k_map == ade_id).astype(np.uint8)
+
+        for class_id, binary_mask in class_id_to_mask.items():
+            clean_mask = self._apply_morphology(binary_mask)
+            project_map[clean_mask > 0] = class_id
+
+        unique, counts = np.unique(ade20k_map, return_counts=True)
+        total = h * w
+        logger.info("  SegFormer ADE20K distribution (top-10):")
+        for ade_id, cnt in sorted(zip(unique, counts), key=lambda x: -x[1])[:10]:
+            result = get_project_label(int(ade_id))
+            label = result[0] if result else f"ADE#{ade_id}"
+            logger.info("    ade_id=%3d  %-20s  %5.1f%%", ade_id, label, 100*cnt/total)
 
         return project_map

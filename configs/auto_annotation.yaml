@@ -68,6 +68,7 @@ min_instance_area: 64 # 8×8 px minimum
 polygon_epsilon_ratio: 0.005 # approxPolyDP epsilon = ratio * perimeter
 min_stuff_coverage: 0.70 # mask_coverage_test minimum acceptable coverage
 detector_confidence: 0.15 # default ultralytics is 0.25
+stuff_morph_kernel_size: 25
 
 # COCO - project label mapping (cpu-fast YOLOv8 path only)
 # Only COCO 80-class names with reliable semantic overlap for USV inland waterway footage.

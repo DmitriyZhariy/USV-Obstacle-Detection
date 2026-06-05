@@ -39,6 +39,7 @@ class AutoAnnotationRunner:
         self.output_dir = Path(args.output_dir)
         self.config_path = Path(args.config)
         self.mode = args.mode
+        self.annot_mode = args.annot_mode
         self.skip_existing = args.skip_existing
         self.debug_vis = args.debug_vis
 
@@ -59,14 +60,20 @@ class AutoAnnotationRunner:
     def _init_cpu_sam2(self) -> None:
         from usv.auto_annotation.pipeline import AutoAnnotationPipeline
 
-        sam2_ckpt = Path(
-            self.args.sam2_checkpoint
-            if self.args.sam2_checkpoint
-            else "models/sam2.1_hiera_small.pt"
-        )
+        # В semantic режиме SAM2 checkpoint не нужен
+        if self.annot_mode == "semantic":
+            sam2_ckpt = Path("models/sam2.1_hiera_small.pt")  # путь передаётся, но не валидируется
+        else:
+            sam2_ckpt = Path(
+                self.args.sam2_checkpoint
+                if self.args.sam2_checkpoint
+                else "models/sam2.1_hiera_small.pt"
+            )
+
         self._pipeline = AutoAnnotationPipeline(
             config_path=self.config_path,
             output_dir=self.output_dir,
+            annot_mode=self.annot_mode,
             inference_resize=int(self.args.inference_resize),
             keyframe_iou_thresh=float(self.args.keyframe_iou_threshold),
             outside_area_thresh=int(self.args.outside_area_threshold),
@@ -74,7 +81,11 @@ class AutoAnnotationRunner:
             skip_existing=self.skip_existing,
             debug_vis=self.debug_vis,
         )
-        logger.info("cpu-sam2 mode: Florence-2 + SAM2 + SegFormer-B0")
+        logger.info(
+            "cpu-sam2 mode: %s  annot_mode=%s",
+            "SegFormer-B0 only" if self.annot_mode == "semantic" else "Florence-2 + SAM2 + SegFormer-B0",
+            self.annot_mode,
+        )
 
     def _init_cpu_fast(self) -> None:
         from usv.auto_annotation.detectors.yolov8_detector import YOLOv8Detector
@@ -109,8 +120,13 @@ class AutoAnnotationRunner:
         sys.exit(1)
 
     def _should_skip(self, clip_name: str) -> bool:
-        zip_path = self.output_dir / "cvat_export" / f"{clip_name}.zip"
-        return self.skip_existing and zip_path.exists()
+        if getattr(self, "annot_mode", "panoptic") == "semantic":
+            out = self.output_dir / "label_maps" / clip_name
+        elif getattr(self, "annot_mode", "panoptic") == "instance":
+            out = self.output_dir / "cvat_export" / f"{clip_name}_coco.json"
+        else:
+            out = self.output_dir / "cvat_export" / f"{clip_name}.zip"
+        return self.skip_existing and out.exists()
 
     def run(self, clip_name: str | None, process_all: bool) -> None:
         clips = self._resolve_clips(clip_name, process_all)
@@ -233,6 +249,16 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--mode", choices=["cpu-fast", "cpu-sam2"], default="cpu-fast",
         help="cpu-fast=YOLOv8+IoU (Phase 1). cpu-sam2=Phase 2 (not yet implemented).",
+    )
+    p.add_argument(
+        "--annot-mode",
+        choices=["panoptic", "instance", "semantic"],
+        default="panoptic",
+        help=(
+            "panoptic = thing tracks + stuff tracks → CVAT XML (default). "
+            "instance = thing tracks only → COCO JSON. "
+            "semantic = stuff maps → PNG label maps."
+        ),
     )
     p.add_argument("--clip-name", default=None)
     p.add_argument("--all", action="store_true", dest="all_clips",

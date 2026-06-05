@@ -7,9 +7,18 @@ interpolates polygons between sparse keyframes, and writes either:
   - an MP4 video        (--output-video)
   - both                (both flags together)
 
-Usage – single clip (paths resolved from project defaults):
+Supports both annotation formats:
+  --annot-mode panoptic  (default) → reads CVAT XML (annotations.xml)
+  --annot-mode instance            → reads COCO JSON (*_coco.json)
+
+Usage – panoptic (default):
     uv run python -m scripts.visualize_annotations \
         --clip-name right_MOVI0017_0001
+
+Usage – instance (COCO JSON):
+    uv run python -m scripts.visualize_annotations \
+        --clip-name right_MOVI0017_0001 \
+        --annot-mode instance
 
 Usage – explicit paths + video output:
     uv run python -m scripts.visualize_annotations \
@@ -17,18 +26,11 @@ Usage – explicit paths + video output:
         --output-video out/right_MOVI0017_0001.mp4 \
         --fps 5 \
         --opacity 0.35
-
-Notes
------
-- Handles <track> elements with sparse polygon keyframes + linear interpolation.
-- Polygons marked outside="1" are skipped (object not visible).
-- z_order is respected: lower z_order layers drawn first (underneath).
-- Clip frames are read from <clips-dir>/frames/<clip-name>/ as JPEG/PNG.
-- Requires only opencv-python and numpy (already in project deps).
 """
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 import xml.etree.ElementTree as ET
@@ -46,7 +48,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Label palette (BGR) – matches existing cvat_polygons_to_mp4.py colours
+# Label palette (BGR)
 # ---------------------------------------------------------------------------
 LABEL_COLORS: dict[str, tuple[int, int, int]] = {
     "Sky":          (135, 206, 235),
@@ -69,7 +71,7 @@ _DEFAULT_COLOR = (128, 128, 128)
 
 class _Keyframe(NamedTuple):
     frame_idx: int
-    points: np.ndarray      # shape (N, 2), float32, pixel coords
+    points: np.ndarray      # shape (N, 2), float32
     outside: bool
 
 
@@ -77,10 +79,11 @@ class _Track(NamedTuple):
     label: str
     z_order: int
     keyframes: list[_Keyframe]
+    track_id: int = 0
 
 
 # ---------------------------------------------------------------------------
-# XML parsing
+# CVAT XML parser (без изменений от оригинала)
 # ---------------------------------------------------------------------------
 
 def _parse_points(points_str: str) -> np.ndarray:
@@ -94,7 +97,7 @@ def _parse_points(points_str: str) -> np.ndarray:
     return np.array(pts, dtype=np.float32)
 
 
-def parse_tracks(xml_path: Path) -> list[_Track]:
+def parse_tracks_xml(xml_path: Path) -> list[_Track]:
     """Parse all <track> elements from a CVAT 1.1 XML file."""
     tree = ET.parse(xml_path)
     root = tree.getroot()
@@ -103,6 +106,7 @@ def parse_tracks(xml_path: Path) -> list[_Track]:
     for track_el in root.findall(".//track"):
         label    = track_el.get("label", "")
         z_order  = int(track_el.get("z_order", "0"))
+        track_id = int(track_el.get("id", "0"))
         kfs: list[_Keyframe] = []
 
         for poly_el in track_el.findall("polygon"):
@@ -113,9 +117,59 @@ def parse_tracks(xml_path: Path) -> list[_Track]:
 
         kfs.sort(key=lambda k: k.frame_idx)
         if kfs:
-            tracks.append(_Track(label=label, z_order=z_order, keyframes=kfs))
+            tracks.append(_Track(
+                label=label, z_order=z_order,
+                track_id=track_id, keyframes=kfs,
+            ))
 
     logger.info("Parsed %d tracks from %s", len(tracks), xml_path.name)
+    return tracks
+
+
+# ---------------------------------------------------------------------------
+# COCO JSON parser
+# ---------------------------------------------------------------------------
+
+def parse_tracks_coco(coco_path: Path) -> list[_Track]:
+    """
+    Parse COCO JSON produced by coco_exporter.py into _Track list.
+    Each annotation is an exact keyframe (no interpolation needed).
+    track_id extra field groups annotations into tracks.
+    """
+    from collections import defaultdict
+
+    data = json.loads(coco_path.read_text(encoding="utf-8"))
+    cat_id_to_name: dict[int, str] = {
+        c["id"]: c["name"] for c in data.get("categories", [])
+    }
+
+    groups: dict[int, list[dict]] = defaultdict(list)
+    for ann in data.get("annotations", []):
+        tid = ann.get("track_id", ann["id"])
+        groups[tid].append(ann)
+
+    tracks: list[_Track] = []
+    for track_id, anns in groups.items():
+        label = cat_id_to_name.get(anns[0]["category_id"], "Unknown")
+        kfs: list[_Keyframe] = []
+        for ann in anns:
+            seg = ann.get("segmentation", [[]])
+            if not seg or not seg[0]:
+                continue
+            flat = seg[0]
+            pts = np.array(
+                [[flat[i], flat[i + 1]] for i in range(0, len(flat), 2)],
+                dtype=np.float32,
+            )
+            kfs.append(_Keyframe(frame_idx=ann["image_id"], points=pts, outside=False))
+        kfs.sort(key=lambda k: k.frame_idx)
+        if kfs:
+            tracks.append(_Track(label=label, z_order=30, keyframes=kfs, track_id=track_id))
+
+    logger.info(
+        "Parsed %d tracks (%d annotations) from %s",
+        len(tracks), len(data.get("annotations", [])), coco_path.name,
+    )
     return tracks
 
 
@@ -124,20 +178,12 @@ def parse_tracks(xml_path: Path) -> list[_Track]:
 # ---------------------------------------------------------------------------
 
 def _lerp_polygon(pts_a: np.ndarray, pts_b: np.ndarray, t: float) -> np.ndarray:
-    """
-    Linear interpolation between two polygons.
-    Falls back to nearest keyframe when vertex counts differ.
-    """
     if pts_a.shape == pts_b.shape:
         return (1.0 - t) * pts_a + t * pts_b
     return pts_a if t < 0.5 else pts_b
 
 
 def get_polygon_at_frame(track: _Track, frame_idx: int) -> np.ndarray | None:
-    """
-    Return the interpolated polygon for frame_idx, or None if the object
-    is outside / before first appearance / after last keyframe.
-    """
     kfs = track.keyframes
     if not kfs or frame_idx < kfs[0].frame_idx or frame_idx > kfs[-1].frame_idx:
         return None
@@ -152,12 +198,8 @@ def get_polygon_at_frame(track: _Track, frame_idx: int) -> np.ndarray | None:
 
     if prev_kf is None:
         return None
-
-    # Exact match on this keyframe
     if prev_kf.frame_idx == frame_idx:
         return None if prev_kf.outside else prev_kf.points
-
-    # Interpolate between prev and next
     if next_kf is None or next_kf.outside:
         return None
 
@@ -176,8 +218,8 @@ def render_frame(
     frame_idx: int,
     opacity: float,
     draw_labels: bool,
+    show_track_id: bool = True,
 ) -> np.ndarray:
-    """Overlay all track polygons onto frame_bgr (returns a new image)."""
     img     = frame_bgr.copy()
     overlay = img.copy()
 
@@ -202,12 +244,12 @@ def render_frame(
             color = LABEL_COLORS.get(track.label, _DEFAULT_COLOR)
             cx = int(pts[:, 0].mean())
             cy = int(pts[:, 1].mean())
-            (tw, th), _ = cv2.getTextSize(
-                track.label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1
-            )
+            # Показываем "Label #id"
+            text = f"{track.label} #{track.track_id}" if show_track_id else track.label
+            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
             cv2.rectangle(img, (cx - 2, cy - th - 2), (cx + tw + 2, cy + 2),
                           (0, 0, 0), -1)
-            cv2.putText(img, track.label, (cx, cy),
+            cv2.putText(img, text, (cx, cy),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
 
     return img
@@ -218,7 +260,6 @@ def render_frame(
 # ---------------------------------------------------------------------------
 
 def load_frames(frames_dir: Path) -> list[tuple[int, Path]]:
-    """Return sorted (frame_index, path) pairs from a directory of JPEG/PNG files."""
     exts = {".jpg", ".jpeg", ".png"}
     entries: list[tuple[int, Path]] = []
     for p in frames_dir.iterdir():
@@ -237,40 +278,49 @@ def load_frames(frames_dir: Path) -> list[tuple[int, Path]]:
 # ---------------------------------------------------------------------------
 
 def visualize(args: argparse.Namespace) -> None:
-    clip_name     = args.clip_name
-    xml_path      = Path(args.xml_path)
-    frames_dir    = Path(args.clips_dir) / "frames" / clip_name
-    opacity       = args.opacity
-    fps           = args.fps
-    draw_labels   = not args.no_labels
+    clip_name   = args.clip_name
+    annot_mode  = args.annot_mode
+    frames_dir  = Path(args.clips_dir) / "frames" / clip_name
+    opacity     = args.opacity
+    fps         = args.fps
+    draw_labels = not args.no_labels
 
-    # Resolve output destinations
+    # ── Загружаем треки в зависимости от annot_mode ──────────────────────
+    if annot_mode == "instance":
+        coco_path = Path(args.coco_path)
+        if not coco_path.exists():
+            logger.error("COCO JSON not found: %s", coco_path)
+            sys.exit(1)
+        tracks = parse_tracks_coco(coco_path)
+    else:
+        # panoptic / default → CVAT XML
+        xml_path = Path(args.xml_path)
+        if not xml_path.exists():
+            logger.error("XML not found: %s", xml_path)
+            sys.exit(1)
+        tracks = parse_tracks_xml(xml_path)
+
+    if not tracks:
+        logger.warning("No tracks found — nothing to render.")
+        return
+
+    if not frames_dir.exists():
+        logger.error("Frames directory not found: %s", frames_dir)
+        sys.exit(1)
+
+    # ── Resolve output destinations ───────────────────────────────────────
     output_frames_dir: Path | None = None
     output_video_path: Path | None = None
 
     if args.output_frames:
         output_frames_dir = Path(args.output_frames)
     elif not args.output_video:
-        # Default: write frames to standard debug location
         output_frames_dir = (
-            Path(args.annotation_dir) / "debug_frames" / clip_name
+            Path(args.annotation_dir) / "debug_frames" / f"{clip_name}_{annot_mode}"
         )
 
     if args.output_video:
         output_video_path = Path(args.output_video)
-
-    # Validate inputs
-    if not xml_path.exists():
-        logger.error("XML not found: %s", xml_path)
-        sys.exit(1)
-    if not frames_dir.exists():
-        logger.error("Frames directory not found: %s", frames_dir)
-        sys.exit(1)
-
-    tracks = parse_tracks(xml_path)
-    if not tracks:
-        logger.warning("No tracks found in %s — nothing to render.", xml_path)
-        return
 
     frame_entries = load_frames(frames_dir)
     if not frame_entries:
@@ -278,7 +328,6 @@ def visualize(args: argparse.Namespace) -> None:
         sys.exit(1)
     logger.info("Found %d frames in %s", len(frame_entries), frames_dir)
 
-    # Setup outputs
     if output_frames_dir:
         output_frames_dir.mkdir(parents=True, exist_ok=True)
         logger.info("Frame output dir : %s", output_frames_dir)
@@ -301,15 +350,18 @@ def visualize(args: argparse.Namespace) -> None:
             output_video_path, w, h, fps,
         )
 
-    # Render loop
+    # ── Render loop ───────────────────────────────────────────────────────
     rendered = 0
     for frame_idx, frame_path in frame_entries:
         bgr = cv2.imread(str(frame_path))
         if bgr is None:
-            logger.warning("Cannot read frame %d (%s) — skipping.", frame_idx, frame_path)
+            logger.warning("Cannot read frame %d — skipping.", frame_idx)
             continue
 
-        vis = render_frame(bgr, tracks, frame_idx, opacity, draw_labels)
+        vis = render_frame(
+            bgr, tracks, frame_idx, opacity, draw_labels,
+            show_track_id=not args.no_track_id,
+        )
 
         if output_frames_dir:
             cv2.imwrite(
@@ -333,64 +385,68 @@ def visualize(args: argparse.Namespace) -> None:
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Render CVAT 1.1 track-format annotations onto clip frames.",
+        description="Render auto-annotation results onto clip frames.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    p.add_argument("--clip-name", required=True)
     p.add_argument(
-        "--clip-name", required=True,
-        help="Clip name (e.g. right_MOVI0017_0001). Used to resolve default paths.",
+        "--annot-mode",
+        choices=["panoptic", "instance"],
+        default="panoptic",
+        help=(
+            "panoptic = read CVAT XML (annotations.xml). "
+            "instance = read COCO JSON (*_coco.json)."
+        ),
     )
     p.add_argument(
         "--annotation-dir",
         default="data/interim/auto_annotations",
-        help="Root annotation output dir (same as --output-dir in run_auto_annotation.py).",
     )
     p.add_argument(
         "--xml-path", default=None,
-        help=(
-            "Path to annotations.xml. "
-            "Defaults to <annotation-dir>/cvat_export/<clip-name>/annotations.xml."
-        ),
+        help="Path to annotations.xml. "
+             "Default: <annotation-dir>/cvat_export/<clip-name>/annotations.xml.",
+    )
+    p.add_argument(
+        "--coco-path", default=None,
+        help="Path to COCO JSON. "
+             "Default: <annotation-dir>/cvat_export/<clip-name>_coco.json.",
     )
     p.add_argument(
         "--clips-dir",
         default="data/interim/choosed_clips_v5-1",
-        help="Root clips dir; frames read from <clips-dir>/frames/<clip-name>/.",
     )
+    p.add_argument("--output-frames", default=None, metavar="DIR")
+    p.add_argument("--output-video", default=None, metavar="PATH")
+    p.add_argument("--fps", type=float, default=5.0)
+    p.add_argument("--opacity", type=float, default=0.35)
+    p.add_argument("--no-labels", action="store_true")
     p.add_argument(
-        "--output-frames", default=None, metavar="DIR",
-        help=(
-            "Write annotated JPEG frames to DIR. "
-            "Default (when --output-video is also absent): "
-            "<annotation-dir>/debug_frames/<clip-name>/."
-        ),
-    )
-    p.add_argument(
-        "--output-video", default=None, metavar="PATH",
-        help="Write annotated MP4 to PATH (e.g. out/right_MOVI0017_0001.mp4).",
-    )
-    p.add_argument(
-        "--fps", type=float, default=5.0,
-        help="Frames per second for the output video.",
-    )
-    p.add_argument(
-        "--opacity", type=float, default=0.35,
-        help="Polygon fill opacity [0.0 – 1.0].",
-    )
-    p.add_argument(
-        "--no-labels", action="store_true",
-        help="Suppress per-polygon label text overlay.",
+        "--no-track-id", action="store_true",
+        help="Hide track ID suffix in label text (show only label name).",
     )
 
     args = p.parse_args()
 
-    # Resolve default xml-path
+    if args.coco_path is None:
+        args.coco_path = str(
+            Path(args.annotation_dir)
+            / "cvat_export"
+            / f"{args.clip_name}_coco.json"
+        )
+    # Resolve default paths
     if args.xml_path is None:
         args.xml_path = str(
             Path(args.annotation_dir)
             / "cvat_export"
             / args.clip_name
             / "annotations.xml"
+        )
+    if args.coco_path is None:
+        args.coco_path = str(
+            Path(args.annotation_dir)
+            / "cvat_export"
+            / f"{args.clip_name}_coco.json"
         )
 
     return args

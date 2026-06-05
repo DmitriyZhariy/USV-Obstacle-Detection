@@ -8,6 +8,7 @@ data/*
 *.jpeg
 *.png
 *.csv
+*.txt
 models/*.pth
 models/*.pt
 models/**/*.pb

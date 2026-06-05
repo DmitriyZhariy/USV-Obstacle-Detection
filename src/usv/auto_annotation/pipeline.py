@@ -92,6 +92,7 @@ class AutoAnnotationPipeline:
         self,
         config_path: Path,
         output_dir: Path,
+        annot_mode: str = "panoptic", # panoptic | instance | semantic
         inference_resize: int = 640,
         keyframe_iou_thresh: float = 0.85,
         outside_area_thresh: int = 100,
@@ -114,127 +115,158 @@ class AutoAnnotationPipeline:
         self._skip_existing   = skip_existing
         self._debug_vis       = debug_vis
         self._inference_resize = inference_resize
+        self._annot_mode = annot_mode
 
         with open(self._config_path, encoding="utf-8") as f:
             self._cfg: dict[str, Any] = yaml.safe_load(f)
 
-        # Validate SAM 2 checkpoint
-        self._sam2_checkpoint = Path(sam2_checkpoint)
-        if not self._sam2_checkpoint.exists():
-            raise FileNotFoundError(
-                f"SAM 2 checkpoint not found: {self._sam2_checkpoint}\n"
-                f"Download with:\n"
-                f"  wget https://dl.fbaipublicfiles.com/segment_anything_2"
-                f"/092824/sam2.1_hiera_small.pt -P models/"
+        # Load models (once; reused across all clips)
+        logger.info("AutoAnnotationPipeline: loading models (annot_mode=%s) ...",
+                    annot_mode)
+
+        
+        from usv.auto_annotation.stuff.segformer_stuff import SegFormerStuff
+        self._stuff_segmentor = None
+        if self._annot_mode in ("panoptic", "semantic"):
+            self._stuff_segmentor = SegFormerStuff(
+                model_name=_SEGFORMER_MODEL,
             )
 
-        # Load models (once; reused across all clips)
-        logger.info("AutoAnnotationPipeline: loading models ...")
-
-        from usv.auto_annotation.detectors.florence2_detector import Florence2Detector
-        from usv.auto_annotation.segmentors.sam2_segmentor import SAM2Segmentor
-        from usv.auto_annotation.tracker.sam2_tracker import SAM2Tracker
-        from usv.auto_annotation.stuff.segformer_stuff import SegFormerStuff
-
-        self._detector = Florence2Detector(
-            config_path=self._config_path,
-            model_name=_FLORENCE2_MODEL,
-            inference_resize=inference_resize,
-        )
-        self._segmentor = SAM2Segmentor(
-            checkpoint=self._sam2_checkpoint,
-            model_cfg=_SAM2_MODEL_CFG,
-        )
-        self._tracker = SAM2Tracker(
-            checkpoint=self._sam2_checkpoint,
-            model_cfg=_SAM2_MODEL_CFG,
-            keyframe_iou_thresh=keyframe_iou_thresh,
-            outside_area_thresh=outside_area_thresh,
-        )
-        self._stuff_segmentor = SegFormerStuff(
-            model_name=_SEGFORMER_MODEL,
-        )
-
+        if annot_mode != 'semantic':
+            # Validate SAM 2 checkpoint
+            self._sam2_checkpoint = Path(sam2_checkpoint)
+            if not self._sam2_checkpoint.exists():
+                raise FileNotFoundError(
+                    f"SAM 2 checkpoint not found: {self._sam2_checkpoint}\n"
+                    f"Download with:\n"
+                    f"  wget https://dl.fbaipublicfiles.com/segment_anything_2"
+                    f"/092824/sam2.1_hiera_small.pt -P models/"
+                )
+            
+            from usv.auto_annotation.detectors.florence2_detector import Florence2Detector
+            from usv.auto_annotation.segmentors.sam2_segmentor import SAM2Segmentor
+            from usv.auto_annotation.tracker.sam2_tracker import SAM2Tracker
+            self._detector = Florence2Detector(
+                config_path=self._config_path,
+                model_name=_FLORENCE2_MODEL,
+                inference_resize=inference_resize,
+            )
+            self._segmentor = SAM2Segmentor(
+                checkpoint=self._sam2_checkpoint,
+                model_cfg=_SAM2_MODEL_CFG,
+            )
+            self._tracker = SAM2Tracker(
+                checkpoint=self._sam2_checkpoint,
+                model_cfg=_SAM2_MODEL_CFG,
+                keyframe_iou_thresh=keyframe_iou_thresh,
+                outside_area_thresh=outside_area_thresh,
+            )
+        else:
+            # В semantic режиме SAM2 checkpoint не нужен — не валидируем
+            self._detector  = None  # type: ignore[assignment]
+            self._segmentor = None
+            self._tracker   = None
+            logger.info(
+                "AutoAnnotationPipeline: semantic mode — "
+                "Florence-2 and SAM2 skipped."
+            )
+        
         logger.info("AutoAnnotationPipeline: all models loaded.")
 
     # Public entry point
 
     def run_clip(self, clip_data: ClipData) -> Path | None:
-        """
-        Run the full panoptic pipeline on one clip.
-
-        Parameters
-        clip_data : ClipData
-            Loaded clip from ClipLoader.load().
-
-        Returns
-        Path | None
-            Path to the output .zip archive, or None if skipped.
-        """
         clip_name = clip_data.clip_name
-        out_zip = self._output_dir / "cvat_export" / f"{clip_name}.zip"
 
-        if self._skip_existing and out_zip.exists():
-            logger.info("[SKIP] %s — output zip already exists", clip_name)
+        # skip_existing: проверяем правильный файл/директорию для каждого режима
+        if self._annot_mode == "instance":
+            out_file = self._output_dir / "cvat_export" / f"{clip_name}_coco.json"
+        elif self._annot_mode == "semantic":
+            out_file = self._output_dir / "label_maps" / clip_name
+        else:
+            out_file = self._output_dir / "cvat_export" / f"{clip_name}.zip"
+
+        if self._skip_existing and out_file.exists():
+            logger.info("[SKIP] %s — output already exists", clip_name)
             return None
 
-        logger.info("[START] %s  mode=cpu-sam2", clip_name)
+        logger.info("[START] %s  annot_mode=%s", clip_name, self._annot_mode)
         t_total = time.perf_counter()
         timings: dict[str, float] = {}
 
-        # Stage 2: Detect things on keyframe
-        t = time.perf_counter()
-        raw_detections = self._stage2_detect(clip_data)
-        timings["s2_detect_ms"] = round((time.perf_counter() - t) * 1000)
-        logger.info(
-            "  S2 detect: %d detections on keyframe %d  (%.0f ms)",
-            len(raw_detections), clip_data.keyframe_idx, timings["s2_detect_ms"],
-        )
-        self._save_raw_detections(clip_data, raw_detections)
+        # Stage 2–4: только для instance и panoptic
+        if self._annot_mode != "semantic":
+            t = time.perf_counter()
+            raw_detections = self._stage2_detect(clip_data)
+            timings["s2_detect_ms"] = round((time.perf_counter() - t) * 1000)
+            logger.info(
+                "  S2 detect: %d detections on keyframe %d  (%.0f ms)",
+                len(raw_detections), clip_data.keyframe_idx, timings["s2_detect_ms"],
+            )
+            self._save_raw_detections(clip_data, raw_detections)
 
-        # Stage 3: Segment keyframe masks
-        t = time.perf_counter()
-        instance_masks = self._stage3_segment(clip_data, raw_detections)
-        timings["s3_segment_ms"] = round((time.perf_counter() - t) * 1000)
-        logger.info(
-            "  S3 segment: %d valid masks  (%.0f ms)",
-            len(instance_masks), timings["s3_segment_ms"],
-        )
+            t = time.perf_counter()
+            instance_masks = self._stage3_segment(clip_data, raw_detections)
+            timings["s3_segment_ms"] = round((time.perf_counter() - t) * 1000)
+            logger.info(
+                "  S3 segment: %d valid masks  (%.0f ms)",
+                len(instance_masks), timings["s3_segment_ms"],
+            )
 
-        # Stage 4: Propagate masks with SAM2Tracker
-        t = time.perf_counter()
-        thing_tracks = self._stage4_track(clip_data, instance_masks)
-        timings["s4_track_ms"] = round((time.perf_counter() - t) * 1000)
-        logger.info(
-            "  S4 track: %d thing tracks  (%.0f ms)",
-            len(thing_tracks), timings["s4_track_ms"],
-        )
+            t = time.perf_counter()
+            thing_tracks = self._stage4_track(clip_data, instance_masks)
+            timings["s4_track_ms"] = round((time.perf_counter() - t) * 1000)
+            logger.info(
+                "  S4 track: %d thing tracks  (%.0f ms)",
+                len(thing_tracks), timings["s4_track_ms"],
+            )
+        else:
+            raw_detections = []
+            instance_masks = []
+            thing_tracks   = []
+            timings["s2_detect_ms"] = timings["s3_segment_ms"] = timings["s4_track_ms"] = 0
 
-        # Stage 5: Stuff segmentation on all frames
-        t = time.perf_counter()
-        stuff_maps = self._stage5_stuff(clip_data)
-        timings["s5_stuff_ms"] = round((time.perf_counter() - t) * 1000)
-        logger.info(
-            "  S5 stuff: %d frames segmented  (%.0f ms)",
-            len(stuff_maps), timings["s5_stuff_ms"],
-        )
+        # Stage 5: Stuff segmentation — нужна в panoptic и semantic
+        if self._annot_mode in ("panoptic", "semantic"):
+            t = time.perf_counter()
+            stuff_maps = self._stage5_stuff(clip_data)
+            timings["s5_stuff_ms"] = round((time.perf_counter() - t) * 1000)
+            logger.info(
+                "  S5 stuff: %d frames segmented  (%.0f ms)",
+                len(stuff_maps), timings["s5_stuff_ms"],
+            )
+        else:
+            stuff_maps = []
+            timings["s5_stuff_ms"] = 0
 
-        # Stage 6 + 7: Overlap resolution (stuff + things merge)
-        t = time.perf_counter()
-        instance_meta = _build_instance_meta(instance_masks)
-        resolved_things, stuff_tracks = self._stage7_resolve(
-            stuff_maps, thing_tracks, instance_meta
-        )
-        timings["s7_resolve_ms"] = round((time.perf_counter() - t) * 1000)
-        logger.info(
-            "  S7 resolve: %d thing tracks, %d stuff tracks  (%.0f ms)",
-            len(resolved_things), len(stuff_tracks), timings["s7_resolve_ms"],
-        )
+        # Stage 7: Overlap resolution — только panoptic
+        if self._annot_mode == "panoptic":
+            t = time.perf_counter()
+            instance_meta = _build_instance_meta(instance_masks)
+            resolved_things, stuff_tracks = self._stage7_resolve(
+                stuff_maps, thing_tracks, instance_meta
+            )
+            timings["s7_resolve_ms"] = round((time.perf_counter() - t) * 1000)
+            logger.info(
+                "  S7 resolve: %d thing tracks, %d stuff tracks  (%.0f ms)",
+                len(resolved_things), len(stuff_tracks), timings["s7_resolve_ms"],
+            )
+        else:
+            resolved_things = thing_tracks
+            stuff_tracks    = []
+            timings["s7_resolve_ms"] = 0
 
-        # Stage 8: Export to CVAT Video XML
+        # Stage 8/9: Export
         t = time.perf_counter()
-        all_tracks = stuff_tracks + resolved_things   # stuff drawn first (lower Z)
-        zip_path = self._stage8_export(clip_data, all_tracks)
+        if self._annot_mode == "instance":
+            zip_path   = self._stage8_export_coco(clip_data, resolved_things)
+            all_tracks = resolved_things
+        elif self._annot_mode == "semantic":
+            zip_path   = self._stage8_export_label_maps(clip_data, stuff_maps)
+            all_tracks = []
+        else:  # panoptic
+            all_tracks = stuff_tracks + resolved_things
+            zip_path   = self._stage8_export(clip_data, all_tracks)
         timings["s8_export_ms"] = round((time.perf_counter() - t) * 1000)
 
         timings["total_ms"] = round((time.perf_counter() - t_total) * 1000)
@@ -243,11 +275,9 @@ class AutoAnnotationPipeline:
             clip_name, zip_path, timings["total_ms"] / 1000,
         )
 
-        # Manifest
         self._write_manifest(clip_data, all_tracks, timings)
 
-        # Debug vis
-        if self._debug_vis:
+        if self._debug_vis and instance_masks:
             self._save_debug_vis(clip_data, instance_masks)
 
         return zip_path
@@ -349,40 +379,57 @@ class AutoAnnotationPipeline:
             out_path, len(serialisable),
         )
 
-    def _stage3_segment(
-        self,
-        clip_data: ClipData,
-        detections: list[dict],
-    ) -> list[dict]:
-        """
-        Stage 3: SAM2Segmentor — box-prompted masks on the keyframe.
-
-        Assigns stable track_ids (1-indexed).
-        Discards instances where mask_area < min_instance_area (64 px ^2).
-        Each output dict:
-            track_id, label, class_id, z_order, confidence, bbox_xyxy, mask
-        """
+    def _stage3_segment(self, clip_data, detections):
         from usv.auto_annotation.postprocess.mask_utils import mask_area
 
         if not detections:
             return []
 
-        min_area = int(self._cfg.get("min_instance_area", 64))
         keyframe = clip_data.frames[clip_data.keyframe_idx]
-        bboxes = [det["bbox_xyxy"] for det in detections]
+        h, w = keyframe.shape[:2]
+        frame_area = h * w
 
-        raw_masks = self._segmentor.segment(keyframe, bboxes)
-
+        # Масштабируемый порог
+        frac = float(self._cfg.get("min_instance_area_frac", 0.0))
+        if frac > 0.0:
+            min_area = int(frac * frame_area)
+        else:
+            # fallback на абсолютный px² для обратной совместимости
+            min_area = int(self._cfg.get("min_instance_area", 64))
+        logger.debug(
+            "  S3: min_instance_area = %d px² (frame %dx%d, frac=%.4f)",
+            min_area, w, h, frac,
+        )
+        # остальной код без изменений
         instance_masks: list[dict] = []
         track_id = 1
-        for det, mask in zip(detections, raw_masks):
-            area = mask_area(mask)
+
+        for det in detections:
+            x1, y1, x2, y2 = det["bbox_xyxy"]
+            bw, bh = x2 - x1, y2 - y1
+            pad_x, pad_y = bw * 2, bh * 2
+            cx1 = max(0, int(x1 - pad_x))
+            cy1 = max(0, int(y1 - pad_y))
+            cx2 = min(w, int(x2 + pad_x))
+            cy2 = min(h, int(y2 + pad_y))
+
+            crop = keyframe[cy1:cy2, cx1:cx2]
+            bbox_in_crop = [[x1 - cx1, y1 - cy1, x2 - cx1, y2 - cy1]]
+            raw_masks_crop = self._segmentor.segment(crop, bbox_in_crop)
+            if not raw_masks_crop:
+                continue
+
+            full_mask = np.zeros((h, w), dtype=np.uint8)
+            full_mask[cy1:cy2, cx1:cx2] = raw_masks_crop[0]
+
+            area = mask_area(full_mask)
             if area < min_area:
                 logger.debug(
-                    "  S3: discarding instance '%s' — area %d px ^2 < %d",
+                    "  S3: discard '%s' — area %d px² < min %d px²",
                     det["label"], area, min_area,
                 )
                 continue
+
             instance_masks.append({
                 "track_id":   track_id,
                 "label":      det["label"],
@@ -390,11 +437,12 @@ class AutoAnnotationPipeline:
                 "z_order":    det["z_order"],
                 "confidence": det["confidence"],
                 "bbox_xyxy":  det["bbox_xyxy"],
-                "mask":       mask,
+                "mask":       full_mask,
             })
             track_id += 1
 
-        logger.debug("  S3: %d / %d instances passed area filter.", len(instance_masks), len(detections))
+        logger.debug("  S3: %d / %d instances passed area filter.",
+                    len(instance_masks), len(detections))
         return instance_masks
 
     def _stage4_track(
@@ -458,6 +506,41 @@ class AutoAnnotationPipeline:
             tracks=all_tracks,
             output_dir=out_dir,
             write_zip=True,
+        )
+    
+    def _stage8_export_coco(
+        self,
+        clip_data: ClipData,
+        all_tracks: list[TrackAnnotation],
+    ) -> Path:
+        """
+        Stage 8: Serialise TrackAnnotation list to CVAT Video XML zip.
+        """
+        from usv.auto_annotation.exporters.coco_exporter import export_coco
+
+        out_dir = self._output_dir / "cvat_export"
+        return export_coco(
+            clip_data=clip_data,
+            tracks=all_tracks,
+            output_dir=out_dir,
+        )
+    
+    def _stage8_export_label_maps(
+        self,
+        clip_data: ClipData,
+        label_maps: list[np.ndarray],
+    ) -> Path:
+        """
+        Stage 9: Export per-frame PNG label maps (semantic mode only).
+        """
+        from usv.auto_annotation.exporters.label_map_exporter import export_label_maps
+
+        out_dir = self._output_dir / "label_maps"
+        return export_label_maps(
+            clip_name=clip_data.clip_name,
+            label_maps=label_maps,
+            output_dir=out_dir,
+            save_vis=self._debug_vis,  # vis только если --debug-vis
         )
 
     # Manifest + debug helpers
