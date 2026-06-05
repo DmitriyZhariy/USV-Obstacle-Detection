@@ -451,18 +451,199 @@ class AutoAnnotationPipeline:
         instance_masks: list[dict],
     ) -> list[TrackAnnotation]:
         """
-        Stage 4: SAM2Tracker forward propagation across all clip frames.
+        Stage 4: SAM2Tracker propagation.
+
+        If multi_keyframe_interval > 0, the clip is split into segments of
+        that length and each segment is tracked independently; tracks are
+        then stitched across segments by bbox IoU.
+
         Returns empty list if no valid instance masks from Stage 3.
         """
         if not instance_masks:
             return []
 
-        self._tracker.init_clip(
-            frames=clip_data.frames,
-            keyframe_idx=clip_data.keyframe_idx,
-            instance_masks=instance_masks,
-        )
-        return self._tracker.finalize()
+        interval = int(self._cfg.get("multi_keyframe_interval", 0))
+        if interval <= 0:
+            # Legacy single-keyframe behaviour
+            self._tracker.init_clip(
+                frames=clip_data.frames,
+                keyframe_idx=clip_data.keyframe_idx,
+                instance_masks=instance_masks,
+            )
+            return self._tracker.finalize()
+
+        return self._run_segmented_tracking(clip_data, interval)
+
+    def _run_segmented_tracking(
+        self,
+        clip_data: ClipData,
+        interval: int,
+    ) -> list[TrackAnnotation]:
+        """
+        Multi-keyframe tracking: split clip into segments of `interval` frames,
+        run Florence-2 + SAM2Segmentor + SAM2Tracker on each, then stitch
+        resulting tracks by bbox IoU.
+
+        Stitching threshold: 0.3 (bbox IoU). Unmatched tracks get new track_ids.
+        """
+        from usv.auto_annotation.postprocess.mask_utils import bbox_iou
+
+        n_frames = clip_data.n_frames
+        # all_tracks: track_id -> TrackAnnotation (stitched result)
+        all_tracks: dict[int, TrackAnnotation] = {}
+        next_global_id = 1
+
+        for seg_start in range(0, n_frames, interval):
+            seg_end = min(seg_start + interval, n_frames)
+            seg_frames = clip_data.frames[seg_start:seg_end]
+            seg_len = len(seg_frames)
+            if seg_len == 0:
+                continue
+
+            local_kf_idx = seg_len // 2
+
+            logger.info(
+                "  S4 segment [%d, %d): keyframe_idx=%d (absolute=%d)",
+                seg_start, seg_end, local_kf_idx, seg_start + local_kf_idx,
+            )
+
+            # Build a temporary ClipData-like object for stage2/3 helpers
+            # We only need .frames and .keyframe_idx for those helpers.
+            import dataclasses
+            seg_clip = dataclasses.replace(
+                clip_data,
+                frames=seg_frames,
+                keyframe_idx=local_kf_idx,
+                n_frames=seg_len,
+            )
+
+            # Stage 2: detect on segment keyframe
+            raw_detections = self._stage2_detect(seg_clip)
+            if not raw_detections:
+                logger.info(
+                    "  S4 segment [%d, %d): no detections — segment skipped.",
+                    seg_start, seg_end,
+                )
+                continue
+
+            # Stage 3: segment keyframe masks
+            seg_instance_masks = self._stage3_segment(seg_clip, raw_detections)
+            if not seg_instance_masks:
+                logger.info(
+                    "  S4 segment [%d, %d): no valid masks — segment skipped.",
+                    seg_start, seg_end,
+                )
+                continue
+
+            # Stage 4: propagate within segment
+            self._tracker.init_clip(
+                frames=seg_frames,
+                keyframe_idx=local_kf_idx,
+                instance_masks=seg_instance_masks,
+                segment_start=seg_start,
+            )
+            seg_tracks: list[TrackAnnotation] = self._tracker.finalize()
+
+            if not seg_tracks:
+                continue
+
+            # Stitch segment tracks into all_tracks by bbox IoU
+            seg_tracks = self._match_segment_tracks(
+                seg_tracks, all_tracks, next_global_id
+            )
+            # Update next_global_id to avoid collisions
+            max_id_in_seg = max((t.track_id for t in seg_tracks), default=0)
+            if max_id_in_seg >= next_global_id:
+                next_global_id = max_id_in_seg + 1
+
+            for seg_track in seg_tracks:
+                tid = seg_track.track_id
+                if tid in all_tracks:
+                    # Append keyframes and keep sorted
+                    all_tracks[tid].keyframes.extend(seg_track.keyframes)
+                    all_tracks[tid].keyframes.sort(key=lambda k: k.frame_idx)
+                else:
+                    all_tracks[tid] = seg_track
+
+        return list(all_tracks.values())
+
+    def _match_segment_tracks(
+        self,
+        seg_tracks: list[TrackAnnotation],
+        all_tracks: dict[int, TrackAnnotation],
+        next_global_id: int,
+    ) -> list[TrackAnnotation]:
+        """
+        Match new segment tracks to existing global tracks by bbox IoU.
+
+        For each seg_track, compute the bbox of its first keyframe and compare
+        against the bbox of the last keyframe of each existing track with the
+        same label. If IoU >= 0.3, reuse that track_id; otherwise assign a
+        new one.
+
+        Returns seg_tracks with track_ids reassigned.
+        """
+        from usv.auto_annotation.postprocess.mask_utils import bbox_iou
+
+        _STITCH_IOU_THRESH = 0.3
+
+        def _points_to_bbox(
+            points: list[tuple[float, float]],
+        ) -> tuple[float, float, float, float]:
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            return (min(xs), min(ys), max(xs), max(ys))
+
+        # Build lookup: label -> list of (track_id, last_keyframe_bbox)
+        existing: dict[str, list[tuple[int, tuple]]] = {}
+        for tid, track in all_tracks.items():
+            if track.keyframes:
+                last_kf = track.keyframes[-1]
+                bbox = _points_to_bbox(last_kf.points)
+                existing.setdefault(track.label, []).append((tid, bbox))
+
+        assigned_existing: set[int] = set()
+        result: list[TrackAnnotation] = []
+
+        for seg_track in seg_tracks:
+            if not seg_track.keyframes:
+                continue
+
+            first_kf = seg_track.keyframes[0]
+            first_bbox = _points_to_bbox(first_kf.points)
+            label = seg_track.label
+
+            best_tid: int | None = None
+            best_iou: float = _STITCH_IOU_THRESH - 1e-9
+
+            for tid, ex_bbox in existing.get(label, []):
+                if tid in assigned_existing:
+                    continue
+                iou = bbox_iou(first_bbox, ex_bbox)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_tid = tid
+
+            if best_tid is not None:
+                assigned_existing.add(best_tid)
+                new_track = TrackAnnotation(
+                    track_id=best_tid,
+                    label=seg_track.label,
+                    z_order=seg_track.z_order,
+                    keyframes=seg_track.keyframes,
+                )
+            else:
+                new_track = TrackAnnotation(
+                    track_id=next_global_id,
+                    label=seg_track.label,
+                    z_order=seg_track.z_order,
+                    keyframes=seg_track.keyframes,
+                )
+                next_global_id += 1
+
+            result.append(new_track)
+
+        return result
 
     def _stage5_stuff(self, clip_data: ClipData) -> list[np.ndarray]:
         """
