@@ -116,6 +116,18 @@ class AutoAnnotationRunner:
             return ClipLoader(self.clips_dir).list_clips()
         if clip_name:
             return [clip_name]
+        input_dir = getattr(self.args, "input_dir", None)
+        if input_dir:
+            p = Path(input_dir)
+            if not p.exists():
+                logger.error("--input-dir not found: %s", p)
+                sys.exit(1)
+            clip_dirs = sorted(d for d in p.iterdir() if d.is_dir())
+            if not clip_dirs:
+                logger.error("--input-dir has no subdirectories: %s", p)
+                sys.exit(1)
+            logger.info("--input-dir: %d clips found in %s", len(clip_dirs), p)
+            return [d.name for d in clip_dirs]
         logger.error("Specify --clip-name or --all")
         sys.exit(1)
 
@@ -147,7 +159,13 @@ class AutoAnnotationRunner:
         logger.info("[START] %s  mode=%s", clip_name, self.mode)
 
         loader = ClipLoader(clips_dir=self.clips_dir)
-        clip_data = loader.load(clip_name)
+
+        input_dir = getattr(self.args, "input_dir", None)
+        if input_dir:
+            clip_data = loader.load_from_dir(Path(input_dir) / clip_name)
+        else:
+            clip_data = loader.load(clip_name)
+
         logger.info(
             "  Loaded %d frames  keyframe_idx=%d  (%dx%d)",
             clip_data.n_frames,
@@ -234,6 +252,14 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--clips-dir", default="data/interim/choosed_clips_v5-1",
         help="Root dir with frames/ and metadata/ subdirs.",
+    )
+    p.add_argument(
+        "--input-dir", default=None, metavar="DIR",
+        help=(
+            "Path to a directory of clip folders (each containing *.jpeg frames). "
+            "Processes all subdirectories as clips. "
+            "No metadata CSV required. Mutually exclusive with --clip-name and --all."
+        ),
     )
     p.add_argument(
         "--output-dir", default="data/interim/auto_annotations",
