@@ -1,15 +1,32 @@
 import cv2
 import numpy as np
 import torch
-import torch.nn as nn
-
+import time
 from ultralytics import YOLO
 import segmentation_models_pytorch as smp
+import torch.nn as nn
 
 
-yolo = YOLO(r"E:\Education\4 course 2 semester\Diploma\panoptic_project\runs\instance_segmentation\yolo\medium\best.pt")
+# =========================
+# Загрузка моделей
+# =========================
+yolo = YOLO(
+    r"C:\Users\follo\Downloads\best (5).pt"
+)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+deeplab = smp.DeepLabV3Plus(
+    encoder_name="resnet50",
+    encoder_weights=None,
+    in_channels=3,
+    classes=3
+)
+
+deeplab.load_state_dict(torch.load(
+    r"E:\Education\4 course 2 semester\Diploma\panoptic_project\runs\semantic_segmentation\deeplab_30\2\deeplab_lars_30.pth",
+    map_location=device
+))
 
 
 # class DoubleConv(nn.Module):
@@ -91,68 +108,55 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # deeplab = deeplab.cuda()
 # deeplab.eval()
 
-deeplab = smp.DeepLabV3Plus(
-    encoder_name="resnet50",
-    encoder_weights=None,
-    in_channels=3,
-    classes=3
-)
-
-deeplab.load_state_dict(torch.load(r"E:\Education\4 course 2 semester\Diploma\panoptic_project\runs\semantic_segmentation\deeplab_30\2\deeplab_lars_30.pth"))
-
 
 deeplab.to(device)
 deeplab.eval()
 
 
+# =========================
+# Цвета
+# =========================
 YOLO_COLORS = {
-    0: (255,255,0),   
-    1: (0,255,0),  
-    2: (255,0,255), 
-    3: (255,165,0), 
-    4: (255,69,0),    
-    5: (255,192,203), 
-    6: (255,215,0),   
-    7: (139,0,255), 
+    0: (255, 255, 0),
+    1: (0, 255, 0),
+    2: (255, 0, 255),
+    # 3: (255, 165, 0),
+    # 4: (255, 69, 0),
+    # 5: (255, 192, 203),
+    # 6: (255, 215, 0),
+    # 7: (139, 0, 255),
 }
 
 DL_COLORS = {
-    0: (255, 0, 0),  
-    1: (0, 0, 255),     
-    2: (0, 255, 255),   
+    0: (0, 0, 255),
+    1: (255, 0, 0),
+    2: (0, 255, 255),
 }
 
 
+# =========================
+# Препроцессинг
+# =========================
 def preprocess(frame):
     img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    img = cv2.resize(img, (512, 512))
-
+    img = cv2.resize(img, (640, 640))
     img = img.astype(np.float32) / 255.0
 
     mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
     std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-
     img = (img - mean) / std
 
-    img = torch.from_numpy(img).float()  
-
+    img = torch.from_numpy(img).float()
     img = img.permute(2, 0, 1).unsqueeze(0)
-
     return img.to(device)
 
 
-cap = cv2.VideoCapture(r"E:\Education\4 course 2 semester\Diploma\panoptic_project\video\output.mp4")
-
-
-INSTANCE_OFFSET = 100
-
-while True:
-
-    ret, frame = cap.read()
-    if not ret:
-        break
-
+# =========================
+# Обработка кадра
+# =========================
+def process_frame(frame):
     h, w, _ = frame.shape
+    frame_draw = frame.copy()
 
     results = yolo.track(
         frame,
@@ -174,14 +178,10 @@ while True:
     )
 
     semantic_vis = np.zeros_like(frame)
-
     for k, color in DL_COLORS.items():
         semantic_vis[semantic == k] = color
 
-    panoptic = semantic.copy()
-
     if results.boxes is not None and results.boxes.id is not None:
-
         boxes = results.boxes
         ids = boxes.id.cpu().numpy().astype(int)
         cls = boxes.cls.cpu().numpy().astype(int)
@@ -189,47 +189,107 @@ while True:
         masks = results.masks.data.cpu().numpy() if results.masks is not None else None
 
         for i in range(len(ids)):
-
             track_id = ids[i]
             class_id = cls[i]
 
             color = YOLO_COLORS.get(class_id, (255, 255, 255))
-
             x1, y1, x2, y2 = boxes.xyxy[i].cpu().numpy().astype(int)
 
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.rectangle(frame_draw, (x1, y1), (x2, y2), color, 2)
             cv2.putText(
-                frame,
+                frame_draw,
                 f"{class_id}:{track_id}",
-                (x1, y1 - 5),
+                (x1, max(y1 - 5, 20)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
                 color,
-                2
+                2,
+                cv2.LINE_AA
             )
 
             if masks is not None:
-
                 mask = masks[i]
                 mask = (mask > 0.5).astype(np.uint8)
-
                 mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
-
-                panoptic_id = INSTANCE_OFFSET + track_id
-                panoptic[mask > 0] = panoptic_id
-
                 yolo_vis[mask > 0] = color
 
-    overlay = cv2.addWeighted(frame, 0.6, semantic_vis, 0.4, 0)
+    overlay = cv2.addWeighted(frame_draw, 0.7 , semantic_vis, 0.2, 0)
     overlay = cv2.addWeighted(overlay, 0.7, yolo_vis, 0.3, 0)
 
-    cv2.imshow("Panoptic Fusion", overlay)
-    cv2.imshow("Semantic", semantic_vis)
-    cv2.imshow("Panoptic ID Map", panoptic.astype(np.uint8))
+    # cv2.putText(
+    #     overlay,
+    #     "Fusion",
+    #     (10, 30),
+    #     cv2.FONT_HERSHEY_SIMPLEX,
+    #     1,
+    #     (255, 255, 255),
+    #     2,
+    #     cv2.LINE_AA
+    # )
 
-    if cv2.waitKey(1) & 0xFF == 27:
+    return overlay
+
+
+# =========================
+# Видео
+# =========================
+video_path = r"C:\Users\follo\Videos\Записи экрана\Запись экрана 2026-06-20 034942.mp4"
+cap = cv2.VideoCapture(video_path)
+
+if not cap.isOpened():
+    raise RuntimeError(f"Не удалось открыть видео: {video_path}")
+
+source_fps = cap.get(cv2.CAP_PROP_FPS)
+if source_fps is None or source_fps <= 0:
+    source_fps = 30.0
+
+target_fps = 5.0
+stride = max(1, int(round(source_fps / target_fps)))
+display_delay = int(1000 / target_fps)
+
+print(f"Source FPS: {source_fps:.2f}")
+print(f"Target FPS: {target_fps:.2f}")
+print(f"Stride: {stride}")
+
+frame_idx = 0
+fps_smooth = 0.0
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
         break
 
+    frame_idx += 1
+
+    # Берём только каждый N-й кадр для обработки
+    if (frame_idx - 1) % stride != 0:
+        continue
+
+    t0 = time.time()
+    overlay = process_frame(frame)
+    processing_time = time.time() - t0
+    actual_fps = 1.0 / max(processing_time, 1e-6)
+    fps_smooth = actual_fps if fps_smooth == 0 else (0.9 * fps_smooth + 0.1 * actual_fps)
+
+    # info1 = f"Video FPS: {source_fps:.1f}"
+    # info2 = f"Target FPS: {target_fps:.1f}"
+    # info3 = f"Stride: {stride}"
+    info4 = f"Actual FPS: {fps_smooth:.1f}"
+
+    # cv2.rectangle(overlay, (10, 40), (280, 150), (0, 0, 0), -1)
+    # cv2.putText(overlay, info1, (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
+    # cv2.putText(overlay, info2, (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
+    # cv2.putText(overlay, info3, (20, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(overlay, info4, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2, cv2.LINE_AA)
+
+    cv2.imshow("Panoptic Viewer", overlay)
+
+    # Если обработка быстрее 200 мс — ждём остаток до 5 FPS
+    remaining = display_delay - int(processing_time * 1000)
+    delay = max(1, remaining)
+
+    if cv2.waitKey(delay) & 0xFF == 27:
+        break
 
 cap.release()
 cv2.destroyAllWindows()

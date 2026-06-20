@@ -8,3 +8,11 @@ notebooks/runs/
 runs/
 Video/
 metrics/
+demo/
+Data/LaRS_Unet/
+Data/LaRS_advanced/
+Data/new_LaRS/
+Data/our_dataset/
+Data/our_dataset1/
+*.zip
+Data/LaRS_advanced.zip
