@@ -16,3 +16,4 @@ Data/our_dataset/
 Data/our_dataset1/
 *.zip
 Data/LaRS_advanced.zip
+notebooks\instance_segmentation\yolact\yolact\
