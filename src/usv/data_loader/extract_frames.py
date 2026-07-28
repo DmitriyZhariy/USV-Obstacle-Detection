@@ -1,46 +1,62 @@
 """
-Script to extract frames from Left Camera and Center Phone.
-Automatically fixes phone rotation issues.
+Extracts frames from raw video files at a fixed time interval.
+
+Supports multi-directory input and three camera prefixes derived from the
+directory path: left, right, center. Center (phone) frames are optionally
+rotated 90° clockwise to correct portrait-mode recording.
+
+Output naming: {prefix}_{global_idx:05d}.jpg
+Global index is a single counter across all videos from all input directories.
 """
+import argparse
 import cv2
 from pathlib import Path
 import tqdm
 
+
 def extract_mixed_frames(
-    input_dirs: list,
+    input_dirs: list[str],
     output_dir: str = "data/interim/labeling_v5",
-    interval_sec: int = 15,
-    rotate_center: bool = True  # Опция для включения/выключения поворота
-):
-    """
+    interval_sec: int = 5,
+    rotate_center: bool = True,
+) -> None:
+    """Extract one frame every `interval_sec` seconds from all videos in `input_dirs`.
+
+    Camera prefix is inferred from the video file path:
+    - "phone" or "center" in path → prefix "center"
+    - "right" in path             → prefix "right"
+    - otherwise                   → prefix "left"
+
     Args:
-        input_dirs: List of folders (e.g. ["data/raw/left_cam", "data/raw/center_phone"])
+        input_dirs: List of directories containing raw video files.
+        output_dir: Destination directory for extracted JPEG frames.
+        interval_sec: Sampling interval in seconds between extracted frames.
+        rotate_center: If True, rotate center-camera frames 90° clockwise.
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # Собираем все видео из всех указанных папок
-    video_files = []
+    video_files: list[Path] = []
     for d in input_dirs:
         p = Path(d)
-        for ext in ['*.avi', '*.mp4', '*.MOV', '*.mkv']: # Добавил mkv на всякий случай
+        for ext in ["*.avi", "*.mp4", "*.MOV", "*.mkv"]:
             video_files.extend(list(p.rglob(ext)))
 
     video_files.sort()
     print(f"Found {len(video_files)} videos in total.")
 
     global_idx = 0
+    failed_videos: list[str] = []
+    failed_frames: list[str] = []
 
     for vid_file in tqdm.tqdm(video_files, desc="Extracting"):
         cap = cv2.VideoCapture(str(vid_file))
         if not cap.isOpened():
-            print(f"Error opening {vid_file}")
+            print(f"[ERROR] Cannot open: {vid_file}")
+            failed_videos.append(str(vid_file))
             continue
 
-        # --- ИСПРАВЛЕННАЯ ЛОГИКА ОПРЕДЕЛЕНИЯ ИСТОЧНИКА ---
-        # Проверяем полный путь (строку), чтобы найти название папки
         path_str = str(vid_file).lower()
-
         if "phone" in path_str or "center" in path_str:
             prefix = "center"
         elif "right" in path_str:
@@ -49,56 +65,73 @@ def extract_mixed_frames(
             prefix = "left"
 
         fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps <= 0: fps = 30
+        if fps <= 0:
+            fps = 30.0
 
-        # Защита от слишком большого интервала
         frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        duration = frame_count / fps
+        step = max(1, int(fps * interval_sec))
 
-        step = int(fps * interval_sec)
-        if step == 0: step = 1 # Чтобы не было бесконечного цикла или ошибки
-
-        # Проходим по кадрам
         for i in range(0, frame_count, step):
             cap.set(cv2.CAP_PROP_POS_FRAMES, i)
             ret, frame = cap.read()
 
             if not ret:
-                # Иногда set() срабатывает, но read() в конце видео может вернуть False
                 break
 
-            # --- ROTATION FIX ---
-            # Применяем только к center и если включена опция
-            if prefix == 'center' and rotate_center:
-                try:
-                    # ROTATE_90_CLOCKWISE подходит, если видео снято вертикально,
-                    # но OpenCV открывает его "лежа" на левом боку.
-                    frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-                except Exception as e:
-                    print(f"Rotation failed on {vid_file}: {e}")
+            if prefix == "center" and rotate_center:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
 
-            # Формируем имя
             fname = f"{prefix}_{global_idx:05d}.jpg"
-
-            # Сохраняем
             cv2.imwrite(str(output_path / fname), frame)
             global_idx += 1
 
         cap.release()
 
-    print(f"Done. Saved {global_idx} images to {output_dir}")
+    print(f"\nDone. Saved {global_idx} frames to '{output_dir}'.")
+
+    if failed_videos:
+        print(f"[WARNING] {len(failed_videos)} video(s) could not be opened:")
+        for v in failed_videos:
+            print(f"  - {v}")
+    if failed_frames:
+        print(f"[WARNING] {len(failed_frames)} frame(s) could not be read.")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Extract frames from raw video files at a fixed time interval."
+    )
+    parser.add_argument(
+        "--input-dirs",
+        nargs="+",
+        default=["data/raw/left_cam", "data/raw/right_cam", "data/raw/center_phone"],
+        help="Paths to raw video directories.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="data/interim/labeling_v10",
+        help="Directory to save extracted JPEG frames.",
+    )
+    parser.add_argument(
+        "--interval-sec",
+        type=int,
+        default=5,
+        help="Sampling interval in seconds between extracted frames (default: 5).",
+    )
+    parser.add_argument(
+        "--no-rotate-center",
+        action="store_false",
+        dest="rotate_center",
+        help="Disable 90° clockwise rotation for center-camera frames.",
+    )
+    return parser.parse_args()
+
 
 if __name__ == "__main__":
-    # Укажи папки, где лежат сырые видео
-    folders = [
-        "data/raw/left_cam",
-        "data/raw/right_cam",
-        "data/raw/center_phone"
-    ]
-
+    args = parse_args()
     extract_mixed_frames(
-        input_dirs=folders,
-        output_dir="data/interim/labeling_v5",
-        interval_sec=5,
-        rotate_center=True
+        input_dirs=args.input_dirs,
+        output_dir=args.output_dir,
+        interval_sec=args.interval_sec,
+        rotate_center=args.rotate_center,
     )
