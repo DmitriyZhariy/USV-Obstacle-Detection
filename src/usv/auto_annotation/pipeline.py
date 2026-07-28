@@ -61,6 +61,8 @@ _SAM2_MODEL_CFG          = "sam2.1_hiera_s"
 _FLORENCE2_MODEL         = "microsoft/Florence-2-base"
 _SEGFORMER_MODEL         = "nvidia/segformer-b0-finetuned-ade-512-512"
 
+_TORCH_THREADS_CONFIGURED = False
+
 
 class AutoAnnotationPipeline:
     """
@@ -103,12 +105,21 @@ class AutoAnnotationPipeline:
         import torch
 
         # CPU optimisations
-        n_threads = os.cpu_count() or 4
-        torch.set_num_threads(n_threads)
-        torch.set_num_interop_threads(2)
-        logger.info(
-            "AutoAnnotationPipeline: CPU threads = %d (interop = 2)", n_threads
-        )
+        global _TORCH_THREADS_CONFIGURED
+
+        if not _TORCH_THREADS_CONFIGURED:
+            n_threads = os.cpu_count() or 4
+            torch.set_num_threads(n_threads)
+            torch.set_num_interop_threads(2)
+            _TORCH_THREADS_CONFIGURED = True
+            logger.info(
+                "AutoAnnotationPipeline: CPU threads configured: %d (interop = 2)",
+                n_threads,
+            )
+        else:
+            logger.debug(
+                "AutoAnnotationPipeline: PyTorch CPU thread settings are already configured."
+            )
 
         self._config_path     = Path(config_path)
         self._output_dir      = Path(output_dir)
