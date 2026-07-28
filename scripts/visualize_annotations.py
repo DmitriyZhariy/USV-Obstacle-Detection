@@ -1,30 +1,34 @@
 """
-Render CVAT 1.1 track-format annotations onto a video clip.
+Render auto-annotation results onto clip frames.
 
-Reads the annotations.xml produced by run_auto_annotation.py (cpu-sam2 mode),
-interpolates polygons between sparse keyframes, and writes either:
-  - a debug JPEG strip  (default, --output-frames)
-  - an MP4 video        (--output-video)
-  - both                (both flags together)
+Supported annotation modes:
+  --annot-mode panoptic  reads CVAT XML track annotations
+  --annot-mode instance  reads COCO JSON instance annotations
+  --annot-mode semantic  reads PNG semantic label maps
 
-Supports both annotation formats:
-  --annot-mode panoptic  (default) → reads CVAT XML (annotations.xml)
-  --annot-mode instance            → reads COCO JSON (*_coco.json)
+The script renders annotation overlays as JPEG frames and, for panoptic
+and instance modes, can also write an MP4 video.
 
-Usage – panoptic (default):
-    uv run python -m scripts.visualize_annotations \
+Usage — panoptic:
+    uv run python -m scripts.visualize_annotations `
         --clip-name right_MOVI0017_0001
 
-Usage – instance (COCO JSON):
-    uv run python -m scripts.visualize_annotations \
-        --clip-name right_MOVI0017_0001 \
+Usage — instance:
+    uv run python -m scripts.visualize_annotations `
+        --clip-name right_MOVI0017_0001 `
         --annot-mode instance
 
-Usage – explicit paths + video output:
-    uv run python -m scripts.visualize_annotations \
-        --clip-name right_MOVI0017_0001 \
-        --output-video out/right_MOVI0017_0001.mp4 \
-        --fps 5 \
+Usage — semantic:
+    uv run python -m scripts.visualize_annotations `
+        --clip-name right_MOVI0017_0001 `
+        --annot-mode semantic
+
+Usage example:
+    uv run python -m scripts.visualize_annotations `
+        --clip-name right_MOVI0017_0001 `
+        --annot-mode instance `
+        --output-video out/right_MOVI0017_0001.mp4 `
+        --fps 5 `
         --opacity 0.35
 """
 from __future__ import annotations
@@ -477,11 +481,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--clip-name", default=None,
         help="Single clip to visualize. Omit to process all clips (see --all).")
     p.add_argument(
-        "--all", action="store_true",
+        "--all",
+        action="store_true",
         help=(
-            "Process all clips found in <annotation-dir>/cvat_export/ "
-            "(panoptic: subdirectories with annotations.xml; "
-            "instance: *_coco.json files)."
+            "Process every available clip for the selected mode "
+            "(panoptic: CVAT XML directories; instance: *_coco.json files; "
+            "semantic: label_maps subdirectories)."
         ),
     )
     p.add_argument(
@@ -489,9 +494,9 @@ def _parse_args() -> argparse.Namespace:
         choices=["panoptic", "instance", "semantic"],
         default="panoptic",
         help=(
-            "panoptic = read CVAT XML (annotations.xml). "
-            "semantic = read CVAT XML (annotations.xml). "
-            "instance = read COCO JSON (*_coco.json)."
+            "panoptic: read CVAT XML tracks; "
+            "instance: read COCO JSON instances; "
+            "semantic: read PNG label maps from label_maps/<clip-name>/."
         ),
     )
     p.add_argument(

@@ -91,16 +91,20 @@ class AutoAnnotationRunner:
         from usv.auto_annotation.detectors.yolov8_detector import YOLOv8Detector
         from usv.auto_annotation.tracker.iou_tracker import IoUTracker
 
-        # Resolve model path: CLI arg - repo root - error
+        # Resolve the model path from CLI or the repository default.
         if self.args.model_path:
-            model_path = Path("models") / self.args.model_path
+            model_path = Path(self.args.model_path)
         else:
-            model_path = Path(__file__).resolve().parent.parent / "models/yolov8n-seg.pt"
+            model_path = (
+                Path(__file__).resolve().parent.parent
+                / "models"
+                / "yolov8n-seg.pt"
+            )
 
         if not model_path.exists():
             raise FileNotFoundError(
-                f"yolov8n-seg.pt not found at {model_path}. "
-                f"Place it in the repo root or pass --model-path explicitly."
+                f"YOLOv8 segmentation model not found: {model_path}. "
+                "Place yolov8n-seg.pt in models/ or pass --model-path PATH."
             )
 
         self._detector = YOLOv8Detector(
@@ -265,16 +269,27 @@ def _parse_args() -> argparse.Namespace:
         "--output-dir", default="data/interim/auto_annotations",
         help="Root output dir for all pipeline artifacts.",
     )
-    # in _parse_args(), add:
-    p.add_argument("--model-path", default=None,
-                help="Explicit path to .pt model file. "
-                        "Defaults to yolov8n-seg.pt in repo root.")
+    p.add_argument(
+        "--model-path",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a YOLOv8 segmentation .pt model. "
+            "Default: models/yolov8n-seg.pt."
+        ),
+    )
     p.add_argument(
         "--config", default="configs/auto_annotation.yaml",
     )
     p.add_argument(
-        "--mode", choices=["cpu-fast", "cpu-sam2"], default="cpu-fast",
-        help="cpu-fast=YOLOv8+IoU (Phase 1). cpu-sam2=Phase 2 (not yet implemented).",
+        "--mode",
+        choices=["cpu-fast", "cpu-sam2"],
+        default="cpu-fast",
+        help=(
+            "cpu-fast: YOLOv8 segmentation with IoU tracking. "
+            "cpu-sam2: Florence-2 detection, SAM2 tracking, and optional "
+            "SegFormer stuff segmentation."
+        ),
     )
     p.add_argument(
         "--annot-mode",
