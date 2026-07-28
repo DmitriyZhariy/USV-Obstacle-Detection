@@ -91,16 +91,20 @@ class AutoAnnotationRunner:
         from usv.auto_annotation.detectors.yolov8_detector import YOLOv8Detector
         from usv.auto_annotation.tracker.iou_tracker import IoUTracker
 
-        # Resolve model path: CLI arg - repo root - error
+        # Resolve the model path from CLI or the repository default.
         if self.args.model_path:
-            model_path = Path("models") / self.args.model_path
+            model_path = Path(self.args.model_path)
         else:
-            model_path = Path(__file__).resolve().parent.parent / "models/yolov8n-seg.pt"
+            model_path = (
+                Path(__file__).resolve().parent.parent
+                / "models"
+                / "yolov8n-seg.pt"
+            )
 
         if not model_path.exists():
             raise FileNotFoundError(
-                f"yolov8n-seg.pt not found at {model_path}. "
-                f"Place it in the repo root or pass --model-path explicitly."
+                f"YOLOv8 segmentation model not found: {model_path}. "
+                "Place yolov8n-seg.pt in models/ or pass --model-path PATH."
             )
 
         self._detector = YOLOv8Detector(
@@ -116,6 +120,18 @@ class AutoAnnotationRunner:
             return ClipLoader(self.clips_dir).list_clips()
         if clip_name:
             return [clip_name]
+        input_dir = getattr(self.args, "input_dir", None)
+        if input_dir:
+            p = Path(input_dir)
+            if not p.exists():
+                logger.error("--input-dir not found: %s", p)
+                sys.exit(1)
+            clip_dirs = sorted(d for d in p.iterdir() if d.is_dir())
+            if not clip_dirs:
+                logger.error("--input-dir has no subdirectories: %s", p)
+                sys.exit(1)
+            logger.info("--input-dir: %d clips found in %s", len(clip_dirs), p)
+            return [d.name for d in clip_dirs]
         logger.error("Specify --clip-name or --all")
         sys.exit(1)
 
@@ -147,7 +163,13 @@ class AutoAnnotationRunner:
         logger.info("[START] %s  mode=%s", clip_name, self.mode)
 
         loader = ClipLoader(clips_dir=self.clips_dir)
-        clip_data = loader.load(clip_name)
+
+        input_dir = getattr(self.args, "input_dir", None)
+        if input_dir:
+            clip_data = loader.load_from_dir(Path(input_dir) / clip_name)
+        else:
+            clip_data = loader.load(clip_name)
+
         logger.info(
             "  Loaded %d frames  keyframe_idx=%d  (%dx%d)",
             clip_data.n_frames,
@@ -236,19 +258,38 @@ def _parse_args() -> argparse.Namespace:
         help="Root dir with frames/ and metadata/ subdirs.",
     )
     p.add_argument(
+        "--input-dir", default=None, metavar="DIR",
+        help=(
+            "Path to a directory of clip folders (each containing *.jpeg frames). "
+            "Processes all subdirectories as clips. "
+            "No metadata CSV required. Mutually exclusive with --clip-name and --all."
+        ),
+    )
+    p.add_argument(
         "--output-dir", default="data/interim/auto_annotations",
         help="Root output dir for all pipeline artifacts.",
     )
-    # in _parse_args(), add:
-    p.add_argument("--model-path", default=None,
-                help="Explicit path to .pt model file. "
-                        "Defaults to yolov8n-seg.pt in repo root.")
+    p.add_argument(
+        "--model-path",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a YOLOv8 segmentation .pt model. "
+            "Default: models/yolov8n-seg.pt (fast) or sam2.1_hiera_small.pt (sam)"
+        ),
+    )
     p.add_argument(
         "--config", default="configs/auto_annotation.yaml",
     )
     p.add_argument(
-        "--mode", choices=["cpu-fast", "cpu-sam2"], default="cpu-fast",
-        help="cpu-fast=YOLOv8+IoU (Phase 1). cpu-sam2=Phase 2 (not yet implemented).",
+        "--mode",
+        choices=["cpu-fast", "cpu-sam2"],
+        default="cpu-fast",
+        help=(
+            "cpu-fast: YOLOv8 segmentation with IoU tracking. "
+            "cpu-sam2: Florence-2 detection, SAM2 tracking, and optional "
+            "SegFormer stuff segmentation."
+        ),
     )
     p.add_argument(
         "--annot-mode",

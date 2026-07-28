@@ -32,3 +32,5 @@ outputs/
 runs/
 *.log
 src/*.egg-info/
+
+.obsidian

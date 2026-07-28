@@ -1,30 +1,34 @@
 """
-Render CVAT 1.1 track-format annotations onto a video clip.
+Render auto-annotation results onto clip frames.
 
-Reads the annotations.xml produced by run_auto_annotation.py (cpu-sam2 mode),
-interpolates polygons between sparse keyframes, and writes either:
-  - a debug JPEG strip  (default, --output-frames)
-  - an MP4 video        (--output-video)
-  - both                (both flags together)
+Supported annotation modes:
+  --annot-mode panoptic  reads CVAT XML track annotations
+  --annot-mode instance  reads COCO JSON instance annotations
+  --annot-mode semantic  reads PNG semantic label maps
 
-Supports both annotation formats:
-  --annot-mode panoptic  (default) → reads CVAT XML (annotations.xml)
-  --annot-mode instance            → reads COCO JSON (*_coco.json)
+The script renders annotation overlays as JPEG frames and, for panoptic
+and instance modes, can also write an MP4 video.
 
-Usage – panoptic (default):
-    uv run python -m scripts.visualize_annotations \
+Usage — panoptic:
+    uv run python -m scripts.visualize_annotations `
         --clip-name right_MOVI0017_0001
 
-Usage – instance (COCO JSON):
-    uv run python -m scripts.visualize_annotations \
-        --clip-name right_MOVI0017_0001 \
+Usage — instance:
+    uv run python -m scripts.visualize_annotations `
+        --clip-name right_MOVI0017_0001 `
         --annot-mode instance
 
-Usage – explicit paths + video output:
-    uv run python -m scripts.visualize_annotations \
-        --clip-name right_MOVI0017_0001 \
-        --output-video out/right_MOVI0017_0001.mp4 \
-        --fps 5 \
+Usage — semantic:
+    uv run python -m scripts.visualize_annotations `
+        --clip-name right_MOVI0017_0001 `
+        --annot-mode semantic
+
+Usage example:
+    uv run python -m scripts.visualize_annotations `
+        --clip-name right_MOVI0017_0001 `
+        --annot-mode instance `
+        --output-video out/right_MOVI0017_0001.mp4 `
+        --fps 5 `
         --opacity 0.35
 """
 from __future__ import annotations
@@ -64,6 +68,46 @@ LABEL_COLORS: dict[str, tuple[int, int, int]] = {
     "Void":         (  0,   0,   0),
 }
 _DEFAULT_COLOR = (128, 128, 128)
+
+# Semantic label map: id → (BGR color, name)
+SEMANTIC_PALETTE: dict[int, tuple[tuple[int, int, int], str]] = {
+    0: ((255, 144,  30), "Water"),
+    1: ((235, 206, 135), "Sky"),
+    2: (( 34, 139,  34), "Land"),
+    3: (( 19,  69, 139), "Pier"),
+    4: ((144, 128, 112), "Bridge"),
+}
+
+def render_semantic_frame(
+    frame_bgr: np.ndarray,
+    label_map: np.ndarray,   # H×W uint8, значения 0..4
+    opacity: float,
+    draw_labels: bool,
+) -> np.ndarray:
+    img     = frame_bgr.copy()
+    overlay = img.copy()
+    h, w    = img.shape[:2]
+
+    for label_id, (color, name) in SEMANTIC_PALETTE.items():
+        mask = label_map == label_id
+        if not mask.any():
+            continue
+        overlay[mask] = color
+
+    cv2.addWeighted(overlay, opacity, img, 1.0 - opacity, 0, img)
+
+    if draw_labels:
+        for label_id, (color, name) in SEMANTIC_PALETTE.items():
+            mask = label_map == label_id
+            if not mask.any():
+                continue
+            ys, xs = np.where(mask)
+            cx, cy = int(xs.mean()), int(ys.mean())
+            (tw, th), _ = cv2.getTextSize(name, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+            cv2.rectangle(img, (cx - 2, cy - th - 2), (cx + tw + 2, cy + 2), (0, 0, 0), -1)
+            cv2.putText(img, name, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
+
+    return img
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -285,16 +329,158 @@ def visualize(args: argparse.Namespace) -> None:
     fps         = args.fps
     draw_labels = not args.no_labels
 
+    # Резолв путей к аннотациям (делается здесь, а не в _parse_args,
+    # чтобы работать при --all когда clip_name меняется в цикле)
+    xml_path = args.xml_path or str(
+        Path(args.annotation_dir) / "cvat_export" / clip_name / "annotations.xml"
+    )
+    coco_path = args.coco_path or str(
+        Path(args.annotation_dir) / "cvat_export" / f"{clip_name}_coco.json"
+    )
+
+    if annot_mode == "semantic":
+        label_maps_dir = Path(args.annotation_dir) / "label_maps" / clip_name
+        if not label_maps_dir.exists():
+            logger.error("Label maps not found: %s", label_maps_dir)
+            sys.exit(1)
+
+        if not frames_dir.exists():
+            logger.error("Frames directory not found: %s", frames_dir)
+            sys.exit(1)
+
+        frame_entries = load_frames(frames_dir)
+        label_paths = sorted(
+            label_maps_dir.glob("*.png"),
+            key=lambda path: int(path.stem),
+        )
+
+        if not frame_entries:
+            logger.error("No image files found in %s", frames_dir)
+            sys.exit(1)
+
+        if not label_paths:
+            logger.error("No PNG label maps found in %s", label_maps_dir)
+            sys.exit(1)
+
+        if len(frame_entries) != len(label_paths):
+            logger.warning(
+                "Frame count (%d) != label map count (%d); rendering the "
+                "shorter sequence.",
+                len(frame_entries),
+                len(label_paths),
+            )
+
+        output_frames_dir: Path | None = None
+        output_video_path: Path | None = None
+
+        if args.output_frames:
+            output_frames_dir = Path(args.output_frames)
+        elif not args.output_video:
+            output_frames_dir = (
+                Path(args.annotation_dir)
+                / "debug_frames"
+                / f"{clip_name}_semantic"
+            )
+
+        if args.output_video:
+            output_video_path = Path(args.output_video)
+
+        if output_frames_dir:
+            output_frames_dir.mkdir(parents=True, exist_ok=True)
+            logger.info("Frame output dir : %s", output_frames_dir)
+
+        writer: cv2.VideoWriter | None = None
+        if output_video_path:
+            first_frame = cv2.imread(str(frame_entries[0][1]))
+            if first_frame is None:
+                logger.error(
+                    "Cannot read first frame to determine video resolution: %s",
+                    frame_entries[0][1],
+                )
+                sys.exit(1)
+
+            height, width = first_frame.shape[:2]
+            output_video_path.parent.mkdir(parents=True, exist_ok=True)
+            writer = cv2.VideoWriter(
+                str(output_video_path),
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                fps,
+                (width, height),
+            )
+
+            if not writer.isOpened():
+                logger.error("Cannot open video output: %s", output_video_path)
+                sys.exit(1)
+
+            logger.info(
+                "Video output     : %s  (%dx%d @ %.1f fps)",
+                output_video_path,
+                width,
+                height,
+                fps,
+            )
+
+        rendered = 0
+        for (frame_idx, frame_path), label_path in zip(frame_entries, label_paths):
+            bgr = cv2.imread(str(frame_path))
+            label_map = cv2.imread(str(label_path), cv2.IMREAD_GRAYSCALE)
+
+            if bgr is None or label_map is None:
+                logger.warning("Skipping frame %d: cannot read input files.", frame_idx)
+                continue
+
+            if bgr.shape[:2] != label_map.shape[:2]:
+                logger.warning(
+                    "Skipping frame %d: frame size %s differs from label-map "
+                    "size %s.",
+                    frame_idx,
+                    bgr.shape[:2],
+                    label_map.shape[:2],
+                )
+                continue
+
+            vis = render_semantic_frame(bgr, label_map, opacity, draw_labels)
+
+            if output_frames_dir:
+                cv2.imwrite(
+                    str(output_frames_dir / f"{frame_idx:05d}.jpg"),
+                    vis,
+                    [cv2.IMWRITE_JPEG_QUALITY, 92],
+                )
+
+            if writer is not None:
+                writer.write(vis)
+
+            rendered += 1
+
+        if writer is not None:
+            writer.release()
+            logger.info("Video saved : %s", output_video_path)
+
+        if output_frames_dir:
+            logger.info(
+                "Frames saved: %s  (%d files)",
+                output_frames_dir,
+                rendered,
+            )
+
+        logger.info(
+            "Done. Rendered %d / %d semantic frames.",
+            rendered,
+            min(len(frame_entries), len(label_paths)),
+        )
+        return
+
     # ── Загружаем треки в зависимости от annot_mode ──────────────────────
     if annot_mode == "instance":
-        coco_path = Path(args.coco_path)
+        coco_path = Path(coco_path)
         if not coco_path.exists():
             logger.error("COCO JSON not found: %s", coco_path)
             sys.exit(1)
         tracks = parse_tracks_coco(coco_path)
     else:
         # panoptic / default → CVAT XML
-        xml_path = Path(args.xml_path)
+        xml_path = Path(xml_path)
         if not xml_path.exists():
             logger.error("XML not found: %s", xml_path)
             sys.exit(1)
@@ -388,14 +574,25 @@ def _parse_args() -> argparse.Namespace:
         description="Render auto-annotation results onto clip frames.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--clip-name", required=True)
+    p.add_argument("--clip-name", default=None,
+        help="Single clip to visualize. Omit to process all clips (see --all).")
+    p.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "Process every available clip for the selected mode "
+            "(panoptic: CVAT XML directories; instance: *_coco.json files; "
+            "semantic: label_maps subdirectories)."
+        ),
+    )
     p.add_argument(
         "--annot-mode",
-        choices=["panoptic", "instance"],
+        choices=["panoptic", "instance", "semantic"],
         default="panoptic",
         help=(
-            "panoptic = read CVAT XML (annotations.xml). "
-            "instance = read COCO JSON (*_coco.json)."
+            "panoptic: read CVAT XML tracks; "
+            "instance: read COCO JSON instances; "
+            "semantic: read PNG label maps from label_maps/<clip-name>/."
         ),
     )
     p.add_argument(
@@ -427,30 +624,54 @@ def _parse_args() -> argparse.Namespace:
     )
 
     args = p.parse_args()
-
-    if args.coco_path is None:
-        args.coco_path = str(
-            Path(args.annotation_dir)
-            / "cvat_export"
-            / f"{args.clip_name}_coco.json"
-        )
-    # Resolve default paths
-    if args.xml_path is None:
-        args.xml_path = str(
-            Path(args.annotation_dir)
-            / "cvat_export"
-            / args.clip_name
-            / "annotations.xml"
-        )
-    if args.coco_path is None:
-        args.coco_path = str(
-            Path(args.annotation_dir)
-            / "cvat_export"
-            / f"{args.clip_name}_coco.json"
-        )
-
     return args
 
 
 if __name__ == "__main__":
-    visualize(_parse_args())
+    args = _parse_args()
+
+    if not args.all and not args.clip_name:
+        import sys
+        print("error: specify --clip-name NAME or --all", file=sys.stderr)
+        sys.exit(1)
+
+    if args.all:
+        annot_dir = Path(args.annotation_dir)
+        cvat_dir = annot_dir / "cvat_export"
+        if args.annot_mode == "panoptic":
+            clip_names = sorted(
+                d.name for d in cvat_dir.iterdir()
+                if d.is_dir() and (d / "annotations.xml").exists()
+            )
+        elif args.annot_mode == "semantic":
+            clip_names = sorted(
+                d.name for d in (annot_dir / "label_maps").iterdir()
+                if d.is_dir()
+            )
+        else:
+            clip_names = sorted(
+                p.stem.removesuffix("_coco")
+                for p in cvat_dir.glob("*_coco.json")
+            )
+
+        if not clip_names:
+            logger.warning("No clips found in %s for mode=%s", cvat_dir, args.annot_mode)
+            sys.exit(0)
+
+        logger.info("--all: %d clips to visualize", len(clip_names))
+        for clip_name in clip_names:
+            logger.info("── %s ──", clip_name)
+            args.clip_name = clip_name
+            # Обновить пути под текущий клип
+            args.xml_path = str(
+                Path(args.annotation_dir) / "cvat_export" / clip_name / "annotations.xml"
+            )
+            args.coco_path = str(
+                Path(args.annotation_dir) / "cvat_export" / f"{clip_name}_coco.json"
+            )
+            # output_frames сбрасываем — пусть каждый клип пишется в свою папку по умолчанию
+            args.output_frames = None
+            args.output_video = None
+            visualize(args)
+    else:
+        visualize(args)

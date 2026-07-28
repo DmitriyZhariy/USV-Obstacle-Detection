@@ -130,6 +130,7 @@ class SAM2Tracker(TrackerBase):
         self._frames: list[np.ndarray] = []
         self._keyframe_idx: int = 0
         self._instance_masks: list[dict] = []   # from SAM2Segmentor Stage 3
+        self._segment_start: int = 0            # absolute index of first frame in segment
         logger.info("SAM2Tracker: ready.")
 
     # Public initialisation - called once per clip
@@ -139,6 +140,7 @@ class SAM2Tracker(TrackerBase):
         frames: list[np.ndarray],
         keyframe_idx: int,
         instance_masks: list[dict],
+        segment_start: int = 0,
     ) -> None:
         """
         Register clip frames and keyframe instance masks before propagation.
@@ -146,10 +148,11 @@ class SAM2Tracker(TrackerBase):
         Parameters
         ----------
         frames : list[np.ndarray]
-            All clip frames in order, BGR uint8. Index 0 = first frame.
+            Frames of the current segment only, BGR uint8. Index 0 = first frame
+            of this segment.
         keyframe_idx : int
-            Index into `frames` that corresponds to the detection keyframe.
-            Instance masks were generated on this frame.
+            Index into `frames` (local, within this segment) that corresponds
+            to the detection keyframe.
         instance_masks : list[dict]
             Output from SAM2Segmentor.segment() enriched by pipeline.py with
             track metadata. Each dict must contain:
@@ -157,10 +160,15 @@ class SAM2Tracker(TrackerBase):
                 label     : str
                 z_order   : int
                 mask      : np.ndarray  H×W uint8 binary
+        segment_start : int
+            Absolute index of the first frame of this segment in the full clip.
+            Used to offset raw_frames keys to absolute frame indices.
+            Default 0 (single-segment / legacy behaviour).
         """
         self._frames = frames
         self._keyframe_idx = keyframe_idx
         self._instance_masks = instance_masks
+        self._segment_start = segment_start
 
     # TrackerBase interface - update() is a no-op for video predictor
 
@@ -198,6 +206,7 @@ class SAM2Tracker(TrackerBase):
         # Clear state so the tracker can be reused for the next clip
         self._frames = []
         self._instance_masks = []
+        self._segment_start = 0
         return track_annotations
 
     # Internal helpers
@@ -268,7 +277,7 @@ class SAM2Tracker(TrackerBase):
                 )
 
             # Stage C: forward propagation
-            logger.info("SAM2Tracker: propagating forward ...")
+            logger.info("SAM2Tracker: propagating backward (0..%d) ...", self._keyframe_idx)
             meta: dict[int, dict] = {
                 inst["track_id"]: {
                     "label":   inst["label"],
@@ -280,25 +289,53 @@ class SAM2Tracker(TrackerBase):
                 obj_id: {} for obj_id in meta
             }
 
-            propagation_iter = self._predictor.propagate_in_video(
+
+            # Pass 1: backward — от keyframe до кадра 0 (включительно)
+            if self._keyframe_idx > 0:
+                backward_iter = self._predictor.propagate_in_video(
+                    inference_state,
+                    start_frame_idx=self._keyframe_idx,
+                    max_frame_num_to_track=self._keyframe_idx + 1,  # keyframe..0
+                    reverse=True,
+                )
+                for frame_idx, obj_ids, mask_logits in tqdm(
+                    backward_iter,
+                    total=self._keyframe_idx + 1,
+                    desc="SAM2 backward",
+                    unit="frame",
+                ):
+                    binary_masks = (mask_logits > 0.0).squeeze(1).cpu().float().numpy()
+                    obj_ids_list = obj_ids.tolist() if hasattr(obj_ids, "tolist") else list(obj_ids)
+                    for i, obj_id in enumerate(obj_ids_list):
+                        if obj_id in raw_frames:
+                            raw_frames[obj_id][frame_idx + self._segment_start] = (
+                                binary_masks[i].astype(np.uint8)
+                            )
+
+            # Pass 2: forward — от keyframe до конца
+            logger.info("SAM2Tracker: propagating forward (%d..%d) ...",
+                        self._keyframe_idx, n_frames - 1)
+            forward_iter = self._predictor.propagate_in_video(
                 inference_state,
-                start_frame_idx=0,
-                max_frame_num_to_track=n_frames,
+                start_frame_idx=self._keyframe_idx,
+                max_frame_num_to_track=n_frames - self._keyframe_idx,
                 reverse=False,
             )
             for frame_idx, obj_ids, mask_logits in tqdm(
-                propagation_iter,
-                total=n_frames,
-                desc="SAM2 propagation",
+                forward_iter,
+                total=n_frames - self._keyframe_idx,
+                desc="SAM2 forward",
                 unit="frame",
             ):
                 binary_masks = (mask_logits > 0.0).squeeze(1).cpu().float().numpy()
                 obj_ids_list = obj_ids.tolist() if hasattr(obj_ids, "tolist") else list(obj_ids)
                 for i, obj_id in enumerate(obj_ids_list):
                     if obj_id in raw_frames:
-                        raw_frames[obj_id][frame_idx] = (
-                            binary_masks[i].astype(np.uint8)
-                        )
+                        # forward не перезаписывает уже заполненные кадры из backward
+                        if frame_idx not in raw_frames[obj_id]:
+                            raw_frames[obj_id][frame_idx + self._segment_start] = (
+                                binary_masks[i].astype(np.uint8)
+                            )
 
         # Reset after exiting inference_mode (reset_state is safe outside)
         self._predictor.reset_state(inference_state)
