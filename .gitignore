@@ -31,3 +31,5 @@ venv/
 outputs/
 runs/
 *.log
+
+.obsidian

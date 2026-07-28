@@ -1,104 +1,152 @@
 """
-Applies a static ignore mask to specified images in a dataset.
+Applies a static ignore mask to images selected by camera identifier.
 
-This script is designed to process a directory of frames, identify those
-from a specific camera (e.g., a center-mounted phone), and apply a predefined
-mask to them. This is useful for blacking out parts of the image that
-should be ignored during model training, such as the ego-vehicle's bow.
-
-Images not matching the criteria (e.g., from side dashcams) are copied
-to the destination directory unmodified.
+Frames whose filename contains a configured identifier are masked. Other frames
+are copied to the output directory unchanged. The expected use case is masking
+the visible USV hull in frames captured by a center-mounted phone camera.
 """
-import cv2
+import argparse
 import shutil
 from pathlib import Path
+
+import cv2
 from tqdm import tqdm
+
 
 def process_frames_with_mask(
     input_dir: str,
     output_dir: str,
     mask_path: str,
-    camera_identifiers: list = ["phone", "center"]
-):
-    """
-    Applies an ignore mask to images containing specific identifiers in their names.
+    camera_identifiers: list[str] | None = None,
+) -> None:
+    """Apply an ignore mask to frames matching configured camera identifiers.
+
+    The black pixels in the grayscale mask become black in the output image.
+    The mask is resized to the input frame size when necessary.
 
     Args:
-        input_dir (str): Path to the directory with source frames.
-        output_dir (str): Path to the directory where processed frames will be saved.
-        mask_path (str): Path to the ignore mask image (black area = ignore).
-        camera_identifiers (list): A list of substrings to identify target frames.
+        input_dir: Directory containing source JPEG or PNG frames.
+        output_dir: Directory where processed frames are written.
+        mask_path: Path to a grayscale ignore-mask image.
+        camera_identifiers: Case-insensitive filename fragments identifying
+            frames that require masking. Defaults to ``["phone", "center"]``.
+
+    Raises:
+        FileNotFoundError: If the mask image cannot be read.
+        ValueError: If no JPEG or PNG images are found in ``input_dir``.
     """
+    if camera_identifiers is None:
+        camera_identifiers = ["phone", "center"]
+
     src_path = Path(input_dir)
     dst_path = Path(output_dir)
+    mask_file = Path(mask_path)
+
+    if not src_path.is_dir():
+        raise NotADirectoryError(f"Input directory not found: {src_path}")
+
+    mask = cv2.imread(str(mask_file), cv2.IMREAD_GRAYSCALE)
+    if mask is None:
+        raise FileNotFoundError(f"Mask image cannot be read: {mask_file}")
+
+    image_files = sorted(
+        path
+        for pattern in ("*.jpg", "*.jpeg", "*.png")
+        for path in src_path.glob(pattern)
+    )
+    if not image_files:
+        raise ValueError(f"No JPEG or PNG images found in: {src_path}")
+
     dst_path.mkdir(parents=True, exist_ok=True)
 
-    # 1. Load the mask
-    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-    if mask is None:
-        print(f"Error: Mask file not found at '{mask_path}'.")
-        print("Please create a mask image where the area to be ignored is black.")
-        return
+    masked_count = 0
+    copied_count = 0
+    skipped_count = 0
+    failed_writes = 0
+    mask_resized = None
+    mask_shape = None
 
-    # 2. Find all images
-    image_files = list(src_path.glob("*.jpg")) + list(src_path.glob("*.png"))
-    if not image_files:
-        print(f"Warning: No images found in '{src_path}'.")
-        return
+    print(f"Processing {len(image_files)} image(s) from '{src_path}'.")
 
-    print(f"Processing {len(image_files)} images from '{src_path}'...")
+    for image_path in tqdm(image_files, desc="Applying ignore mask"):
+        output_path = dst_path / image_path.name
+        filename_lower = image_path.name.lower()
+        should_apply_mask = any(
+            identifier.lower() in filename_lower
+            for identifier in camera_identifiers
+        )
 
-    # 3. Process each image
-    mask_resized = None # Cache for resized mask
+        if not should_apply_mask:
+            try:
+                shutil.copy2(image_path, output_path)
+                copied_count += 1
+            except OSError as error:
+                print(f"[ERROR] Cannot copy '{image_path}': {error}")
+                failed_writes += 1
+            continue
 
-    for img_file in tqdm(image_files):
-        filename_lower = img_file.name.lower()
+        image = cv2.imread(str(image_path))
+        if image is None:
+            print(f"[WARNING] Cannot read image, skipped: {image_path}")
+            skipped_count += 1
+            continue
 
-        # Check if any identifier is in the filename
-        should_apply_mask = any(id in filename_lower for id in camera_identifiers)
+        height, width = image.shape[:2]
+        target_shape = (height, width)
+        if mask_resized is None or mask_shape != target_shape:
+            mask_resized = cv2.resize(mask, (width, height))
+            mask_shape = target_shape
 
-        if should_apply_mask:
-            img = cv2.imread(str(img_file))
-            if img is None:
-                print(f"Warning: Could not read image {img_file.name}, skipping.")
-                continue
+        masked_image = cv2.bitwise_and(image, image, mask=mask_resized)
+        if not cv2.imwrite(str(output_path), masked_image):
+            print(f"[ERROR] Cannot write masked image: {output_path}")
+            failed_writes += 1
+            continue
 
-            h, w = img.shape[:2]
+        masked_count += 1
 
-            # 4. Resize mask if necessary (and cache it)
-            if mask_resized is None or mask_resized.shape[0] != h or mask_resized.shape[1] != w:
-                mask_resized = cv2.resize(mask, (w, h))
+    print("\nProcessing complete.")
+    print(f"  Masked: {masked_count}")
+    print(f"  Copied unchanged: {copied_count}")
+    print(f"  Skipped unreadable: {skipped_count}")
+    print(f"  Failed writes: {failed_writes}")
+    print(f"  Output directory: {dst_path}")
 
-            # 5. Apply mask (bitwise_and makes black areas in mask black in output)
-            result_img = cv2.bitwise_and(img, img, mask=mask_resized)
 
-            # Save the masked image
-            cv2.imwrite(str(dst_path / img_file.name), result_img)
-        else:
-            # If no identifier matches, just copy the file
-            shutil.copy(img_file, dst_path / img_file.name)
-
-    print("-" * 30)
-    print("Processing complete.")
-    print(f"All frames have been saved to: '{dst_path}'")
-    print("You can now use this directory for labeling.")
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the ignore-mask stage."""
+    parser = argparse.ArgumentParser(
+        description="Apply an ignore mask to selected dataset frames."
+    )
+    parser.add_argument(
+        "--input-dir",
+        default="data/interim/labeling_upscaled",
+        help="Directory with source JPEG or PNG frames.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="data/interim/labeling_upscaled_masked_v4",
+        help="Directory where processed frames are saved.",
+    )
+    parser.add_argument(
+        "--mask-path",
+        default="data/interim/phone_ignore_mask.png",
+        help="Path to the grayscale ignore-mask image.",
+    )
+    parser.add_argument(
+        "--camera-identifiers",
+        nargs="+",
+        default=["phone", "center"],
+        help="Filename fragments identifying frames to mask.",
+    )
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    # --- Configuration ---
-    # Create this mask manually. The part of your boat should be BLACK,
-    # and the rest of the scene should be WHITE.
-    MASK_FILE = "data/interim/phone_ignore_mask.png"
-
-    # Make sure the mask file exists before running
-    if not Path(MASK_FILE).exists():
-        print(f"ERROR: Mask file not found at '{MASK_FILE}'")
-        print("Please create it first. It should be a PNG file.")
-        print("The area to HIDE (your boat) must be BLACK.")
-        print("The area to KEEP must be WHITE.")
-    else:
-        process_frames_with_mask(
-            input_dir="data/interim/labeling_upscaled",
-            output_dir="data/interim/labeling_upscaled_masked_v4",
-            mask_path=MASK_FILE
-        )
+    args = parse_args()
+    process_frames_with_mask(
+        input_dir=args.input_dir,
+        output_dir=args.output_dir,
+        mask_path=args.mask_path,
+        camera_identifiers=args.camera_identifiers,
+    )
