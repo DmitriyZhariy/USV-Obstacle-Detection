@@ -275,7 +275,7 @@ def _parse_args() -> argparse.Namespace:
         metavar="PATH",
         help=(
             "Path to a YOLOv8 segmentation .pt model. "
-            "Default: models/yolov8n-seg.pt."
+            "Default: models/yolov8n-seg.pt (fast) or sam2.1_hiera_small.pt (sam)"
         ),
     )
     p.add_argument(
