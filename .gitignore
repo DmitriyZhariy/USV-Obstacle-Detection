@@ -5,10 +5,14 @@ data/*
 *.avi
 *.mov
 *.jpg
+*.jpeg
 *.png
+*.pt
+*.csv
 models/*.pth
 models/*.pt
 models/*.onnx
+models/*/*.pb
 weights/
 
 # --- Python & UV ---
@@ -27,3 +31,5 @@ venv/
 outputs/
 runs/
 *.log
+
+.obsidian
