@@ -624,28 +624,6 @@ def _parse_args() -> argparse.Namespace:
     )
 
     args = p.parse_args()
-
-    # if args.coco_path is None:
-    #     args.coco_path = str(
-    #         Path(args.annotation_dir)
-    #         / "cvat_export"
-    #         / f"{args.clip_name}_coco.json"
-    #     )
-    # # Resolve default paths
-    # if args.xml_path is None:
-    #     args.xml_path = str(
-    #         Path(args.annotation_dir)
-    #         / "cvat_export"
-    #         / args.clip_name
-    #         / "annotations.xml"
-    #     )
-    # if args.coco_path is None:
-    #     args.coco_path = str(
-    #         Path(args.annotation_dir)
-    #         / "cvat_export"
-    #         / f"{args.clip_name}_coco.json"
-    #     )
-
     return args
 
 
