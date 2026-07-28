@@ -1,0 +1,81 @@
+# Auto-annotation pipeline configuration
+
+paths:
+  clips_dir: "data/interim/choosed_clips_v5-1"
+  output_dir: "data/interim/auto_annotations"
+
+# Label taxonomy
+# group: stuff | things | void
+# z_order: closer to the object - higher z-order (those numbers are approximate)
+labels:
+  - name: Water
+    id: 0
+    group: stuff
+    z_order: 0
+  - name: Sky
+    id: 1
+    group: stuff
+    z_order: 1
+  - name: Land
+    id: 2
+    group: stuff
+    z_order: 5
+  - name: Pier
+    id: 3
+    group: stuff
+    z_order: 10
+  - name: Bridge
+    id: 4
+    group: stuff
+    z_order: 10
+  - name: Vessel
+    id: 5
+    group: things
+    z_order: 30
+  - name: LandingMark
+    id: 6
+    group: things
+    z_order: 40
+  - name: BridgeLight
+    id: 7
+    group: things
+    z_order: 40
+  - name: Buoy
+    id: 8
+    group: things
+    z_order: 50
+  - name: Other
+    id: 9
+    group: things
+    z_order: 60
+  - name: Void
+    id: 10
+    group: void
+    z_order: 100
+
+models:
+  sam2_checkpoint: models/sam2.1_hiera_small.pt
+  sam2_config: configs/sam2.1/sam2.1_hiera_small
+  florence2_model: microsoft/Florence-2-base
+  segformer_model: nvidia/segformer-b0-finetuned-ade-512-512
+
+# Pipeline thresholds
+inference_resize: 640 # long-side resize before Florence-2
+keyframe_iou_threshold: 0.85 # below this - mark propagated frame as keyframe
+outside_area_threshold: 100 # mask area (px^2) below this - outside=True
+stuff_keyframe_iou_threshold: 0.90 # stuff polygon change threshold
+min_instance_area: 64 # 8×8 px minimum
+polygon_epsilon_ratio: 0.005 # approxPolyDP epsilon = ratio * perimeter
+min_stuff_coverage: 0.70 # mask_coverage_test minimum acceptable coverage
+detector_confidence: 0.15 # default ultralytics is 0.25
+
+# COCO - project label mapping (cpu-fast YOLOv8 path only)
+# Only COCO 80-class names with reliable semantic overlap for USV inland waterway footage.
+coco_mapping:
+  boat:       Vessel
+  person:     Other
+  car:        Other
+  truck:      Other
+  bus:        Other
+  bicycle:    Other
+  motorcycle: Other
