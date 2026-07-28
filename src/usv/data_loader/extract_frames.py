@@ -16,7 +16,7 @@ import tqdm
 
 def extract_mixed_frames(
     input_dirs: list[str],
-    output_dir: str = "data/interim/labeling_v5",
+    output_dir: str,
     interval_sec: int = 5,
     rotate_center: bool = True,
 ) -> None:
