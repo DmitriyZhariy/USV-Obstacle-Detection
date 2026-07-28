@@ -344,36 +344,132 @@ def visualize(args: argparse.Namespace) -> None:
             logger.error("Label maps not found: %s", label_maps_dir)
             sys.exit(1)
 
-        out_dir = Path(args.annotation_dir) / "debug_frames" / f"{clip_name}_semantic"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        logger.info("Semantic output: %s", out_dir)
+        if not frames_dir.exists():
+            logger.error("Frames directory not found: %s", frames_dir)
+            sys.exit(1)
 
         frame_entries = load_frames(frames_dir)
-        label_paths   = sorted(label_maps_dir.glob("*.png"), key=lambda p: int(p.stem))
+        label_paths = sorted(
+            label_maps_dir.glob("*.png"),
+            key=lambda path: int(path.stem),
+        )
+
+        if not frame_entries:
+            logger.error("No image files found in %s", frames_dir)
+            sys.exit(1)
+
+        if not label_paths:
+            logger.error("No PNG label maps found in %s", label_maps_dir)
+            sys.exit(1)
 
         if len(frame_entries) != len(label_paths):
             logger.warning(
-                "Frame count (%d) != label map count (%d) — will render min of both",
-                len(frame_entries), len(label_paths),
+                "Frame count (%d) != label map count (%d); rendering the "
+                "shorter sequence.",
+                len(frame_entries),
+                len(label_paths),
+            )
+
+        output_frames_dir: Path | None = None
+        output_video_path: Path | None = None
+
+        if args.output_frames:
+            output_frames_dir = Path(args.output_frames)
+        elif not args.output_video:
+            output_frames_dir = (
+                Path(args.annotation_dir)
+                / "debug_frames"
+                / f"{clip_name}_semantic"
+            )
+
+        if args.output_video:
+            output_video_path = Path(args.output_video)
+
+        if output_frames_dir:
+            output_frames_dir.mkdir(parents=True, exist_ok=True)
+            logger.info("Frame output dir : %s", output_frames_dir)
+
+        writer: cv2.VideoWriter | None = None
+        if output_video_path:
+            first_frame = cv2.imread(str(frame_entries[0][1]))
+            if first_frame is None:
+                logger.error(
+                    "Cannot read first frame to determine video resolution: %s",
+                    frame_entries[0][1],
+                )
+                sys.exit(1)
+
+            height, width = first_frame.shape[:2]
+            output_video_path.parent.mkdir(parents=True, exist_ok=True)
+            writer = cv2.VideoWriter(
+                str(output_video_path),
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                fps,
+                (width, height),
+            )
+
+            if not writer.isOpened():
+                logger.error("Cannot open video output: %s", output_video_path)
+                sys.exit(1)
+
+            logger.info(
+                "Video output     : %s  (%dx%d @ %.1f fps)",
+                output_video_path,
+                width,
+                height,
+                fps,
             )
 
         rendered = 0
         for (frame_idx, frame_path), label_path in zip(frame_entries, label_paths):
             bgr = cv2.imread(str(frame_path))
             label_map = cv2.imread(str(label_path), cv2.IMREAD_GRAYSCALE)
+
             if bgr is None or label_map is None:
-                logger.warning("Skipping frame %d — cannot read files.", frame_idx)
+                logger.warning("Skipping frame %d: cannot read input files.", frame_idx)
+                continue
+
+            if bgr.shape[:2] != label_map.shape[:2]:
+                logger.warning(
+                    "Skipping frame %d: frame size %s differs from label-map "
+                    "size %s.",
+                    frame_idx,
+                    bgr.shape[:2],
+                    label_map.shape[:2],
+                )
                 continue
 
             vis = render_semantic_frame(bgr, label_map, opacity, draw_labels)
-            cv2.imwrite(
-                str(out_dir / f"{frame_idx:05d}.jpg"), vis,
-                [cv2.IMWRITE_JPEG_QUALITY, 92],
-            )
+
+            if output_frames_dir:
+                cv2.imwrite(
+                    str(output_frames_dir / f"{frame_idx:05d}.jpg"),
+                    vis,
+                    [cv2.IMWRITE_JPEG_QUALITY, 92],
+                )
+
+            if writer is not None:
+                writer.write(vis)
+
             rendered += 1
 
-        logger.info("Done. Rendered %d frames → %s", rendered, out_dir)
-        return  # ← ранний выход, остальная логика panoptic/instance не нужна
+        if writer is not None:
+            writer.release()
+            logger.info("Video saved : %s", output_video_path)
+
+        if output_frames_dir:
+            logger.info(
+                "Frames saved: %s  (%d files)",
+                output_frames_dir,
+                rendered,
+            )
+
+        logger.info(
+            "Done. Rendered %d / %d semantic frames.",
+            rendered,
+            min(len(frame_entries), len(label_paths)),
+        )
+        return
 
     # ── Загружаем треки в зависимости от annot_mode ──────────────────────
     if annot_mode == "instance":
