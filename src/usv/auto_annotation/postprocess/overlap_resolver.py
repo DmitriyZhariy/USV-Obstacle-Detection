@@ -86,8 +86,9 @@ STUFF_KEYFRAME_IOU_THRESH: float = 0.90
 STUFF_TRACK_ID_START: int = 1000
 
 # Minimum polygon area to emit a stuff polygon for a class on a frame
-STUFF_MIN_AREA_PX: int = 64
+# STUFF_MIN_AREA_PX: int = 64
 
+BBOX_OVERLAP_IOU_THRESH: float = 0.05
 
 # Public API
 
@@ -127,11 +128,26 @@ def resolve_overlaps(
     )
 
     # Step 2: build stuff tracks from per-frame maps
-    stuff_tracks = _build_stuff_tracks(stuff_maps, label_to_z, config)
+    # Вычислить абсолютный порог для stuff из фракции или абсолютного значения
+    if stuff_maps:
+        sample_map = stuff_maps[0]
+        frame_area = sample_map.shape[0] * sample_map.shape[1]
+    else:
+        frame_area = 1
 
-    logger.info(
-        "resolve_overlaps: %d thing tracks, %d stuff tracks produced.",
-        len(resolved_things), len(stuff_tracks),
+    frac = float(config.get("min_stuff_area_frac", 0.0))
+    if frac > 0.0:
+        min_stuff_area_px = max(1, int(frac * frame_area))
+    else:
+        min_stuff_area_px = int(config.get("min_instance_area", 64))
+
+    logger.debug(
+        "resolve_overlaps: min_stuff_area = %d px² (frame_area=%d, frac=%.4f)",
+        min_stuff_area_px, frame_area, frac,
+    )
+
+    stuff_tracks = _build_stuff_tracks(
+        stuff_maps, label_to_z, config, min_stuff_area_px=min_stuff_area_px
     )
     return resolved_things, stuff_tracks
 
@@ -249,11 +265,25 @@ def _polygon_bbox(
 def _bboxes_overlap(
     a: tuple[float, float, float, float],
     b: tuple[float, float, float, float],
+    iou_threshold: float = BBOX_OVERLAP_IOU_THRESH,
 ) -> bool:
-    """Return True if two (x1,y1,x2,y2) bounding boxes intersect."""
     ax1, ay1, ax2, ay2 = a
     bx1, by1, bx2, by2 = b
-    return ax1 < bx2 and ax2 > bx1 and ay1 < by2 and ay2 > by1
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+    inter_w = max(0.0, inter_x2 - inter_x1)
+    inter_h = max(0.0, inter_y2 - inter_y1)
+    inter_area = inter_w * inter_h
+    if inter_area == 0.0:
+        return False
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union_area = area_a + area_b - inter_area
+    if union_area <= 0.0:
+        return False
+    return (inter_area / union_area) >= iou_threshold
 
 # Build stuff tracks from per-frame class_id maps
 
@@ -261,6 +291,7 @@ def _build_stuff_tracks(
     stuff_maps: list[np.ndarray],
     label_to_z: dict[str, int],
     config: dict[str, Any],
+    min_stuff_area_px: int = 64,
 ) -> list[TrackAnnotation]:
     """
     Convert per-frame stuff class_id maps into TrackAnnotation objects.
@@ -275,7 +306,10 @@ def _build_stuff_tracks(
     # Build class_id - (label_name, z_order) from config
     mapped_class_ids = {cid for _, cid, _ in ADE20K_TO_PROJECT.values()}
     id_to_label = {
-        lbl["id"]: (lbl["name"], lbl["z_order"])
+        lbl["id"]: (
+            lbl["name"], lbl["z_order"],
+            float(lbl.get("keyframe_iou_thresh", STUFF_KEYFRAME_IOU_THRESH)),
+        )
         for lbl in config["labels"]
         if lbl.get("group") == "stuff" and lbl["id"] in mapped_class_ids
     }
@@ -296,7 +330,7 @@ def _build_stuff_tracks(
     for frame_idx, proj_map in enumerate(stuff_maps):
         for class_id in id_to_label:
             binary = (proj_map == class_id).astype(np.uint8)
-            if mask_area(binary) >= STUFF_MIN_AREA_PX:
+            if mask_area(binary) >= min_stuff_area_px:
                 class_frame_masks[class_id][frame_idx] = binary
 
     stuff_tracks: list[TrackAnnotation] = []
@@ -307,13 +341,13 @@ def _build_stuff_tracks(
             logger.debug(
                 "_build_stuff_tracks: class_id=%d has no frames "
                 "with area >= %d px² - skipped.",
-                class_id, STUFF_MIN_AREA_PX,
+                class_id, min_stuff_area_px,
             )
             continue
 
-        label_name, z_order = id_to_label[class_id]
+        label_name, z_order, iou_thresh = id_to_label[class_id]
         keyframes = _stuff_keyframes(
-            frame_mask_map, label_name, class_id
+            frame_mask_map, label_name, class_id, iou_thresh=iou_thresh
         )
         if not keyframes:
             continue
@@ -340,6 +374,7 @@ def _stuff_keyframes(
     frame_mask_map: dict[int, np.ndarray],
     label_name: str,
     class_id: int,
+    iou_thresh: float = STUFF_KEYFRAME_IOU_THRESH,
 ) -> list[PolygonKeyframe]:
     """
     Build sparse keyframe list for one stuff class.
@@ -365,19 +400,18 @@ def _stuff_keyframes(
             is_keyframe = True
         else:
             iou = mask_iou(mask, last_kf_mask)
-            is_keyframe = iou < STUFF_KEYFRAME_IOU_THRESH
+            is_keyframe = iou < iou_thresh
 
         if not is_keyframe:
             continue
 
         polygon = mask_to_polygon(mask)
-        if len(polygon) < 3:
+        if polygon is None or len(polygon) < 3:
             logger.debug(
                 "_stuff_keyframes: class '%s' frame %d - "
-                "degenerate polygon (%d pts) skipped.",
-                label_name, frame_idx, len(polygon),
+                "degenerate polygon (%s pts) skipped.",
+                label_name, frame_idx, len(polygon) if polygon is not None else "None",
             )
-            # Do not update last_kf_mask - wait for a valid polygon
             continue
 
         keyframe_list.append(PolygonKeyframe(
@@ -388,5 +422,21 @@ def _stuff_keyframes(
             occluded=False,
         ))
         last_kf_mask = mask  # update reference
+
+    # После цикла: если есть keyframe, но последний frame_idx клипа
+    # не включён явно — добавить закрывающий keyframe на последний кадр.
+    if keyframe_list and sorted_frames:
+        last_frame_idx = sorted_frames[-1]
+        if keyframe_list[-1].frame_idx != last_frame_idx:
+            closing_mask = frame_mask_map[last_frame_idx]
+            closing_poly = mask_to_polygon(closing_mask)
+            if closing_poly is not None and len(closing_poly) >= 3:
+                keyframe_list.append(PolygonKeyframe(
+                    frame_idx=last_frame_idx,
+                    points=closing_poly,
+                    keyframe=True,
+                    outside=False,
+                    occluded=False,
+                ))
 
     return keyframe_list

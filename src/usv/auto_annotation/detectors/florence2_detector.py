@@ -2,8 +2,8 @@
 Florence-2-base open-vocabulary detector for the cpu-sam2 pipeline mode.
 
 Model : microsoft/Florence-2-base (HuggingFace transformers)
-Task  : <OD> open-vocabulary detection using project thing-class label names
-        as the prompt.
+Task  : <CAPTION_TO_PHRASE_GROUNDING> open-vocabulary detection using project
+        thing-class label names as the grounding prompt.
 
 Bbox rescale contract
 ---------------------
@@ -42,6 +42,33 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "microsoft/Florence-2-base"
 _FLORENCE_GRID = 1000.0   # Florence-2 normalises to this grid — never change
+_MARITIME_SYNONYMS: dict[str, list[str]] = {
+    "Vessel":      ["boat", "ship", "watercraft"],
+    "Buoy":        ["buoy", "navigation buoy"],
+    "LandingMark": ["range marker", "navigation mark", "leading mark"],
+    "BridgeLight": ["navigation light", "signal light"],
+    "Other":       ["floating debris", "driftwood", "bird"],
+}
+
+def _deduplicate_detections(
+    detections: list[dict],
+    iou_threshold: float = 0.7,
+) -> list[dict]:
+    """
+    Remove duplicate detections of the same label with high bbox IoU.
+    Keeps the first occurrence (order from Florence-2 output).
+    """
+    from usv.auto_annotation.postprocess.mask_utils import bbox_iou
+    kept: list[dict] = []
+    for det in detections:
+        duplicate = False
+        for k in kept:
+            if bbox_iou(k["bbox_xyxy"], det["bbox_xyxy"]) > iou_threshold:
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(det)
+    return kept
 
 
 class Florence2Detector(DetectorBase):
@@ -85,8 +112,24 @@ class Florence2Detector(DetectorBase):
 
         # Build the prompt once — reused for every frame
         # Format: "Vessel . Buoy . LandingMark . BridgeLight . Other"
-        self._prompt = " . ".join(self._label_meta.keys())
-        self._task_token = "<OD>"
+        # self._prompt = " . ".join(self._label_meta.keys())
+        _synonyms_flat: list[str] = []
+        _PROMPT_ORDER = ["Vessel", "Buoy", "LandingMark", "BridgeLight", "Other"]
+        for label_name in _PROMPT_ORDER:
+            if label_name in self._label_meta:
+                _synonyms_flat.extend(
+                    _MARITIME_SYNONYMS.get(label_name, [label_name])
+                )
+        self._prompt = " . ".join(_synonyms_flat)
+        # boat . ship . vessel . kayak . ferry . buoy . marker . float
+
+        # Обратный маппинг: синоним - project label (для _match_label)
+        self._synonym_to_label: dict[str, str] = {
+            syn: label_name
+            for label_name in self._label_meta.keys()
+            for syn in _MARITIME_SYNONYMS.get(label_name, [label_name])
+        }
+        self._task_token = "<CAPTION_TO_PHRASE_GROUNDING>"
         self._inference_resize = inference_resize
 
         logger.info(
@@ -176,7 +219,7 @@ class Florence2Detector(DetectorBase):
         pil_img = _PIL_Image.fromarray(resized_rgb)
 
         inputs = self._processor(
-            text=f"<CAPTION_TO_PHRASE_GROUNDING> {self._prompt}",
+            text=f"{self._task_token} {self._prompt}",
             images=pil_img,
             return_tensors="pt",
         )
@@ -195,15 +238,18 @@ class Florence2Detector(DetectorBase):
             generated_ids, skip_special_tokens=False
         )[0]
 
-        # Post-process: parse Florence-2 structured output
+        # Post-process: передаём оригинальный размер кадра (W, H).
+        # Florence-2 денормализует 1000-сетку напрямую в оригинальные пиксели.
+        # НЕ передавать pil_img.size — это размер ресайзнутого кадра (360×640),
+        # что приводит к двойному масштабированию и сдвигу bbox влево/вверх.
         parsed = self._processor.post_process_generation(
             generated_text,
-            task="<CAPTION_TO_PHRASE_GROUNDING>",
-            image_size=(pil_img.width, pil_img.height),
+            task=self._task_token,
+            image_size=(orig_w, orig_h),  # оригинальный (W, H)
         )
 
-        # parsed[<CAPTION_TO_PHRASE_GROUNDING>] = {"bboxes": [[x1,y1,x2,y2], ...], "labels": ["...", ...]}
-        od_result = parsed.get("<CAPTION_TO_PHRASE_GROUNDING>", {})
+        # parsed[self._task_token] = {"bboxes": [[x1,y1,x2,y2], ...], "labels": ["...", ...]}
+        od_result = parsed.get(self._task_token, {})
         raw_bboxes: list[list[float]] = od_result.get("bboxes", [])
         raw_labels: list[str] = od_result.get("labels", [])
 
@@ -215,9 +261,7 @@ class Florence2Detector(DetectorBase):
             return []
 
         detections: list[dict] = []
-        for bbox_1000, raw_label in zip(raw_bboxes, raw_labels):
-            # Match Florence-2 label to nearest project thing label
-            # Florence-2 may return the exact prompt word or a close variant
+        for bbox_orig_list, raw_label in zip(raw_bboxes, raw_labels):
             project_label = self._match_label(raw_label)
             if project_label is None:
                 logger.debug(
@@ -226,10 +270,16 @@ class Florence2Detector(DetectorBase):
                 continue
 
             meta = self._label_meta[project_label]
-            bbox_orig = self._rescale_bbox(bbox_1000, orig_h, orig_w)
 
-            # Skip degenerate boxes (width or height < 1px after rescaling)
-            x1, y1, x2, y2 = bbox_orig
+            # bbox уже в оригинальных пикселях — только клипуем по границам кадра
+            x1, y1, x2, y2 = bbox_orig_list
+            x1 = max(0.0, x1)
+            y1 = max(0.0, y1)
+            x2 = min(float(orig_w), x2)
+            y2 = min(float(orig_h), y2)
+            bbox_orig = (x1, y1, x2, y2)
+
+            # Skip degenerate boxes (width or height < 1px)
             if (x2 - x1) < 1.0 or (y2 - y1) < 1.0:
                 continue
 
@@ -246,35 +296,32 @@ class Florence2Detector(DetectorBase):
             "Florence2Detector: %d detections on frame (%dx%d)",
             len(detections), orig_w, orig_h,
         )
+
+        detections = _deduplicate_detections(detections, iou_threshold=0.4)
+
         return detections
 
     def _match_label(self, raw_label: str) -> str | None:
-        """
-        Match a Florence-2 output label string to a project thing-class name.
-
-        Florence-2 tends to echo the prompt word but may capitalise
-        differently or return a substring. Strategy:
-          1. Exact match (case-insensitive)
-          2. Substring match: project label contained in raw_label
-          3. No match → None
-
-        Parameters
-        ----------
-        raw_label : str
-            Label string from Florence-2 structured output.
-
-        Returns
-        -------
-        str | None
-            Matched project label name, or None if no match found.
-        """
         raw_lower = raw_label.strip().lower()
-        # Pass 1: exact
+
+        # Pass 0: прямой маппинг синонима → project label
+        for synonym, proj_label in self._synonym_to_label.items():
+            if synonym == raw_lower:
+                return proj_label
+
+        # Pass 1: exact project label (case-insensitive)
         for proj_label in self._label_meta:
             if proj_label.lower() == raw_lower:
                 return proj_label
-        # Pass 2: substring (e.g. "small vessel" → "Vessel")
+
+        # Pass 2: substring — синоним содержится в raw_label
+        for synonym, proj_label in self._synonym_to_label.items():
+            if synonym in raw_lower:
+                return proj_label
+
+        # Pass 3: project label содержится в raw_label
         for proj_label in self._label_meta:
             if proj_label.lower() in raw_lower:
                 return proj_label
+
         return None

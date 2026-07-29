@@ -86,6 +86,61 @@ class ClipLoader:
             meta_df=meta_df,
             original_video=original_video,
         )
+    
+    def load_from_dir(self, frames_dir: Path) -> ClipData:
+        """
+        Load a clip directly from a frames directory (no metadata CSV required).
+
+        Frame files: {frames_dir}/{local_seq_idx:04d}.jpeg  (1-based)
+        clip_name is derived from frames_dir.name.
+        keyframe_idx is derived as len(frames) // 2.
+        """
+        frames_dir = Path(frames_dir)
+        if not frames_dir.exists():
+            raise ClipNotFoundError(f"Frames directory not found: {frames_dir}")
+
+        clip_name = frames_dir.name
+
+        jpeg_files = sorted(frames_dir.glob("*.jpeg"))
+        if not jpeg_files:
+            raise ClipNotFoundError(f"No .jpeg files found in: {frames_dir}")
+
+        frames = []
+        seq_indices = []
+        for img_path in jpeg_files:
+            frame = cv2.imread(str(img_path))
+            if frame is None:
+                logger.warning("Could not read frame: %s — skipping", img_path)
+                continue
+            frames.append(frame)
+            try:
+                seq_indices.append(int(img_path.stem))
+            except ValueError:
+                seq_indices.append(len(seq_indices) + 1)
+
+        if not frames:
+            raise ClipNotFoundError(f"No readable frames in: {frames_dir}")
+
+        actual_n = len(frames)
+        h, w = frames[0].shape[:2]
+        keyframe_idx = actual_n // 2
+
+        meta_df = pd.DataFrame({
+            "local_seq_idx": seq_indices,
+            "original_video": [clip_name] * actual_n,
+            "original_frame_idx": seq_indices,
+        })
+
+        return ClipData(
+            clip_name=clip_name,
+            frames=frames,
+            keyframe_idx=keyframe_idx,
+            n_frames=actual_n,
+            frame_height=h,
+            frame_width=w,
+            meta_df=meta_df,
+            original_video=clip_name,
+        )
 
     def list_clips(self) -> list[str]:
         """Return sorted list of all available clip names."""

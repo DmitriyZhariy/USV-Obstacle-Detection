@@ -119,6 +119,8 @@ class SAM2Tracker(TrackerBase):
             apply_postprocessing=False,
         )
         GlobalHydra.instance().clear()
+        
+        _patch_predictor_for_cpu_fp32(self._predictor)
 
         self._torch = torch
         self._keyframe_iou_thresh = keyframe_iou_thresh
@@ -128,6 +130,7 @@ class SAM2Tracker(TrackerBase):
         self._frames: list[np.ndarray] = []
         self._keyframe_idx: int = 0
         self._instance_masks: list[dict] = []   # from SAM2Segmentor Stage 3
+        self._segment_start: int = 0            # absolute index of first frame in segment
         logger.info("SAM2Tracker: ready.")
 
     # Public initialisation - called once per clip
@@ -137,6 +140,7 @@ class SAM2Tracker(TrackerBase):
         frames: list[np.ndarray],
         keyframe_idx: int,
         instance_masks: list[dict],
+        segment_start: int = 0,
     ) -> None:
         """
         Register clip frames and keyframe instance masks before propagation.
@@ -144,10 +148,11 @@ class SAM2Tracker(TrackerBase):
         Parameters
         ----------
         frames : list[np.ndarray]
-            All clip frames in order, BGR uint8. Index 0 = first frame.
+            Frames of the current segment only, BGR uint8. Index 0 = first frame
+            of this segment.
         keyframe_idx : int
-            Index into `frames` that corresponds to the detection keyframe.
-            Instance masks were generated on this frame.
+            Index into `frames` (local, within this segment) that corresponds
+            to the detection keyframe.
         instance_masks : list[dict]
             Output from SAM2Segmentor.segment() enriched by pipeline.py with
             track metadata. Each dict must contain:
@@ -155,10 +160,15 @@ class SAM2Tracker(TrackerBase):
                 label     : str
                 z_order   : int
                 mask      : np.ndarray  H×W uint8 binary
+        segment_start : int
+            Absolute index of the first frame of this segment in the full clip.
+            Used to offset raw_frames keys to absolute frame indices.
+            Default 0 (single-segment / legacy behaviour).
         """
         self._frames = frames
         self._keyframe_idx = keyframe_idx
         self._instance_masks = instance_masks
+        self._segment_start = segment_start
 
     # TrackerBase interface - update() is a no-op for video predictor
 
@@ -196,6 +206,7 @@ class SAM2Tracker(TrackerBase):
         # Clear state so the tracker can be reused for the next clip
         self._frames = []
         self._instance_masks = []
+        self._segment_start = 0
         return track_annotations
 
     # Internal helpers
@@ -266,7 +277,7 @@ class SAM2Tracker(TrackerBase):
                 )
 
             # Stage C: forward propagation
-            logger.info("SAM2Tracker: propagating forward ...")
+            logger.info("SAM2Tracker: propagating backward (0..%d) ...", self._keyframe_idx)
             meta: dict[int, dict] = {
                 inst["track_id"]: {
                     "label":   inst["label"],
@@ -278,24 +289,53 @@ class SAM2Tracker(TrackerBase):
                 obj_id: {} for obj_id in meta
             }
 
-            propagation_iter = self._predictor.propagate_in_video(
+
+            # Pass 1: backward — от keyframe до кадра 0 (включительно)
+            if self._keyframe_idx > 0:
+                backward_iter = self._predictor.propagate_in_video(
+                    inference_state,
+                    start_frame_idx=self._keyframe_idx,
+                    max_frame_num_to_track=self._keyframe_idx + 1,  # keyframe..0
+                    reverse=True,
+                )
+                for frame_idx, obj_ids, mask_logits in tqdm(
+                    backward_iter,
+                    total=self._keyframe_idx + 1,
+                    desc="SAM2 backward",
+                    unit="frame",
+                ):
+                    binary_masks = (mask_logits > 0.0).squeeze(1).cpu().float().numpy()
+                    obj_ids_list = obj_ids.tolist() if hasattr(obj_ids, "tolist") else list(obj_ids)
+                    for i, obj_id in enumerate(obj_ids_list):
+                        if obj_id in raw_frames:
+                            raw_frames[obj_id][frame_idx + self._segment_start] = (
+                                binary_masks[i].astype(np.uint8)
+                            )
+
+            # Pass 2: forward — от keyframe до конца
+            logger.info("SAM2Tracker: propagating forward (%d..%d) ...",
+                        self._keyframe_idx, n_frames - 1)
+            forward_iter = self._predictor.propagate_in_video(
                 inference_state,
-                start_frame_idx=0,
-                max_frame_num_to_track=n_frames,
+                start_frame_idx=self._keyframe_idx,
+                max_frame_num_to_track=n_frames - self._keyframe_idx,
                 reverse=False,
             )
             for frame_idx, obj_ids, mask_logits in tqdm(
-                propagation_iter,
-                total=n_frames,
-                desc="SAM2 propagation",
+                forward_iter,
+                total=n_frames - self._keyframe_idx,
+                desc="SAM2 forward",
                 unit="frame",
             ):
                 binary_masks = (mask_logits > 0.0).squeeze(1).cpu().float().numpy()
-                for i, obj_id in enumerate(obj_ids):
+                obj_ids_list = obj_ids.tolist() if hasattr(obj_ids, "tolist") else list(obj_ids)
+                for i, obj_id in enumerate(obj_ids_list):
                     if obj_id in raw_frames:
-                        raw_frames[obj_id][frame_idx] = (
-                            binary_masks[i].astype(np.uint8)
-                        )
+                        # forward не перезаписывает уже заполненные кадры из backward
+                        if frame_idx not in raw_frames[obj_id]:
+                            raw_frames[obj_id][frame_idx + self._segment_start] = (
+                                binary_masks[i].astype(np.uint8)
+                            )
 
         # Reset after exiting inference_mode (reset_state is safe outside)
         self._predictor.reset_state(inference_state)
@@ -432,3 +472,74 @@ class SAM2Tracker(TrackerBase):
             obj_id, frame_idx,
         )
         return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+    
+
+def _patch_predictor_for_cpu_fp32(predictor) -> None:
+    """
+    Patch SAM2's _prepare_memory_conditioned_features to cast maskmem_features
+    to float32 at the READ site, immediately before they enter memory_attention.
+
+    Root cause
+    ----------
+    sam2_video_predictor.py unconditionally casts maskmem_features to bfloat16
+    when storing them into the internal output_dict (lines 781 & 833).
+    On CPU inference the model weights stay float32, so feeding bf16 features
+    into memory_attention raises:
+        RuntimeError: mat1 and mat2 must have the same dtype, got BFloat16 and Float
+
+    Why patching _run_single_frame_inference (return value) doesn't work
+    ---------------------------------------------------------------------
+    That method returns compact_out for the CALLER's storage, but internally
+    it also writes into output_dict BEFORE assembling compact_out.
+    _prepare_memory_conditioned_features reads from output_dict, so by the
+    time our return-value patch fires, the bf16 features are already cached
+    inside the model state and will be read back as bf16 on the next frame.
+
+    Fix
+    ---
+    Patch _prepare_memory_conditioned_features directly on the model (sam2_base)
+    to cast maskmem_features to the compute dtype (float32) at the point where
+    they are loaded from the cache: the `.to(device)` call on line 575.
+    This is the single chokepoint all stored features pass through before
+    entering memory_attention, regardless of which code path wrote them.
+    """
+    import torch
+    import types
+
+    model = predictor.model if hasattr(predictor, "model") else predictor
+
+    original_pmcf = model._prepare_memory_conditioned_features.__func__
+
+    def _patched_pmcf(self_inner, *args, **kwargs):
+        # Temporarily monkey-patch the stored maskmem_features in every cached
+        # output to be float32 before the original method reads them.
+        # We do this by wrapping the dict __getitem__ — but that is fragile.
+        # Instead: run the original, catch the dtype error, and re-run after
+        # casting all cached features. Simpler: just cast before calling.
+        #
+        # The cleanest approach: patch at the exact line that does
+        #   feats = prev["maskmem_features"].to(device, non_blocking=True)
+        # by casting all prev["maskmem_features"] in the output_dicts to f32
+        # before the original function iterates over them.
+        #
+        # output_dict is passed as a kwarg or positional arg — find it.
+        output_dict = kwargs.get("output_dict") or (args[3] if len(args) > 3 else None)
+        if output_dict is not None:
+            for storage_key in ("cond_frame_outputs", "non_cond_frame_outputs"):
+                for frame_out in output_dict.get(storage_key, {}).values():
+                    if (
+                        isinstance(frame_out, dict)
+                        and frame_out.get("maskmem_features") is not None
+                    ):
+                        frame_out["maskmem_features"] = frame_out[
+                            "maskmem_features"
+                        ].to(torch.float32)
+        return original_pmcf(self_inner, *args, **kwargs)
+
+    model._prepare_memory_conditioned_features = types.MethodType(
+        _patched_pmcf, model
+    )
+    logger.debug(
+        "SAM2Tracker: bfloat16→float32 patch applied to "
+        "_prepare_memory_conditioned_features."
+    )

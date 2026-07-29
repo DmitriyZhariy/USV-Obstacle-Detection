@@ -39,6 +39,7 @@ class AutoAnnotationRunner:
         self.output_dir = Path(args.output_dir)
         self.config_path = Path(args.config)
         self.mode = args.mode
+        self.annot_mode = args.annot_mode
         self.skip_existing = args.skip_existing
         self.debug_vis = args.debug_vis
 
@@ -59,14 +60,20 @@ class AutoAnnotationRunner:
     def _init_cpu_sam2(self) -> None:
         from usv.auto_annotation.pipeline import AutoAnnotationPipeline
 
-        sam2_ckpt = Path(
-            self.args.sam2_checkpoint
-            if self.args.sam2_checkpoint
-            else "models/sam2.1_hiera_small.pt"
-        )
+        # В semantic режиме SAM2 checkpoint не нужен
+        if self.annot_mode == "semantic":
+            sam2_ckpt = Path("models/sam2.1_hiera_small.pt")  # путь передаётся, но не валидируется
+        else:
+            sam2_ckpt = Path(
+                self.args.sam2_checkpoint
+                if self.args.sam2_checkpoint
+                else "models/sam2.1_hiera_small.pt"
+            )
+
         self._pipeline = AutoAnnotationPipeline(
             config_path=self.config_path,
             output_dir=self.output_dir,
+            annot_mode=self.annot_mode,
             inference_resize=int(self.args.inference_resize),
             keyframe_iou_thresh=float(self.args.keyframe_iou_threshold),
             outside_area_thresh=int(self.args.outside_area_threshold),
@@ -74,22 +81,30 @@ class AutoAnnotationRunner:
             skip_existing=self.skip_existing,
             debug_vis=self.debug_vis,
         )
-        logger.info("cpu-sam2 mode: Florence-2 + SAM2 + SegFormer-B0")
+        logger.info(
+            "cpu-sam2 mode: %s  annot_mode=%s",
+            "SegFormer-B0 only" if self.annot_mode == "semantic" else "Florence-2 + SAM2 + SegFormer-B0",
+            self.annot_mode,
+        )
 
     def _init_cpu_fast(self) -> None:
         from usv.auto_annotation.detectors.yolov8_detector import YOLOv8Detector
         from usv.auto_annotation.tracker.iou_tracker import IoUTracker
 
-        # Resolve model path: CLI arg - repo root - error
+        # Resolve the model path from CLI or the repository default.
         if self.args.model_path:
-            model_path = Path("models") / self.args.model_path
+            model_path = Path(self.args.model_path)
         else:
-            model_path = Path(__file__).resolve().parent.parent / "models/yolov8n-seg.pt"
+            model_path = (
+                Path(__file__).resolve().parent.parent
+                / "models"
+                / "yolov8n-seg.pt"
+            )
 
         if not model_path.exists():
             raise FileNotFoundError(
-                f"yolov8n-seg.pt not found at {model_path}. "
-                f"Place it in the repo root or pass --model-path explicitly."
+                f"YOLOv8 segmentation model not found: {model_path}. "
+                "Place yolov8n-seg.pt in models/ or pass --model-path PATH."
             )
 
         self._detector = YOLOv8Detector(
@@ -105,12 +120,29 @@ class AutoAnnotationRunner:
             return ClipLoader(self.clips_dir).list_clips()
         if clip_name:
             return [clip_name]
+        input_dir = getattr(self.args, "input_dir", None)
+        if input_dir:
+            p = Path(input_dir)
+            if not p.exists():
+                logger.error("--input-dir not found: %s", p)
+                sys.exit(1)
+            clip_dirs = sorted(d for d in p.iterdir() if d.is_dir())
+            if not clip_dirs:
+                logger.error("--input-dir has no subdirectories: %s", p)
+                sys.exit(1)
+            logger.info("--input-dir: %d clips found in %s", len(clip_dirs), p)
+            return [d.name for d in clip_dirs]
         logger.error("Specify --clip-name or --all")
         sys.exit(1)
 
     def _should_skip(self, clip_name: str) -> bool:
-        zip_path = self.output_dir / "cvat_export" / f"{clip_name}.zip"
-        return self.skip_existing and zip_path.exists()
+        if getattr(self, "annot_mode", "panoptic") == "semantic":
+            out = self.output_dir / "label_maps" / clip_name
+        elif getattr(self, "annot_mode", "panoptic") == "instance":
+            out = self.output_dir / "cvat_export" / f"{clip_name}_coco.json"
+        else:
+            out = self.output_dir / "cvat_export" / f"{clip_name}.zip"
+        return self.skip_existing and out.exists()
 
     def run(self, clip_name: str | None, process_all: bool) -> None:
         clips = self._resolve_clips(clip_name, process_all)
@@ -131,7 +163,13 @@ class AutoAnnotationRunner:
         logger.info("[START] %s  mode=%s", clip_name, self.mode)
 
         loader = ClipLoader(clips_dir=self.clips_dir)
-        clip_data = loader.load(clip_name)
+
+        input_dir = getattr(self.args, "input_dir", None)
+        if input_dir:
+            clip_data = loader.load_from_dir(Path(input_dir) / clip_name)
+        else:
+            clip_data = loader.load(clip_name)
+
         logger.info(
             "  Loaded %d frames  keyframe_idx=%d  (%dx%d)",
             clip_data.n_frames,
@@ -220,19 +258,48 @@ def _parse_args() -> argparse.Namespace:
         help="Root dir with frames/ and metadata/ subdirs.",
     )
     p.add_argument(
+        "--input-dir", default=None, metavar="DIR",
+        help=(
+            "Path to a directory of clip folders (each containing *.jpeg frames). "
+            "Processes all subdirectories as clips. "
+            "No metadata CSV required. Mutually exclusive with --clip-name and --all."
+        ),
+    )
+    p.add_argument(
         "--output-dir", default="data/interim/auto_annotations",
         help="Root output dir for all pipeline artifacts.",
     )
-    # in _parse_args(), add:
-    p.add_argument("--model-path", default=None,
-                help="Explicit path to .pt model file. "
-                        "Defaults to yolov8n-seg.pt in repo root.")
+    p.add_argument(
+        "--model-path",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a YOLOv8 segmentation .pt model. "
+            "Default: models/yolov8n-seg.pt (fast) or sam2.1_hiera_small.pt (sam)"
+        ),
+    )
     p.add_argument(
         "--config", default="configs/auto_annotation.yaml",
     )
     p.add_argument(
-        "--mode", choices=["cpu-fast", "cpu-sam2"], default="cpu-fast",
-        help="cpu-fast=YOLOv8+IoU (Phase 1). cpu-sam2=Phase 2 (not yet implemented).",
+        "--mode",
+        choices=["cpu-fast", "cpu-sam2"],
+        default="cpu-fast",
+        help=(
+            "cpu-fast: YOLOv8 segmentation with IoU tracking. "
+            "cpu-sam2: Florence-2 detection, SAM2 tracking, and optional "
+            "SegFormer stuff segmentation."
+        ),
+    )
+    p.add_argument(
+        "--annot-mode",
+        choices=["panoptic", "instance", "semantic"],
+        default="panoptic",
+        help=(
+            "panoptic = thing tracks + stuff tracks → CVAT XML (default). "
+            "instance = thing tracks only → COCO JSON. "
+            "semantic = stuff maps → PNG label maps."
+        ),
     )
     p.add_argument("--clip-name", default=None)
     p.add_argument("--all", action="store_true", dest="all_clips",

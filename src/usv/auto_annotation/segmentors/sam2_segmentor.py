@@ -118,23 +118,24 @@ class SAM2Segmentor(InstanceSegmentorBase):
                 point_coords=None,
                 point_labels=None,
                 box=boxes_np,
-                multimask_output=False,  # one mask per box
+                multimask_output=True,  # 3 masks per box
             )
 
-        # masks_out shape: (N, 1, H, W) bool when multimask_output=False
-        # For a single box SAM2 returns (1, H, W); for multiple (N, 1, H, W).
-        # Normalise to always (N, H, W) uint8.
+        # masks_out shape: (N, 3, H, W) bool when multimask_output=True
+        # scores shape:    (N, 3) float  — iou_predictions per mask candidate
+        # For a single box SAM2 returns (3, H, W) and (3,); normalise to (N, 3, H, W).
         if masks_out.ndim == 3:
-            # Single box case: (1, H, W) → add batch dim → (1, 1, H, W)
+            # Single box case: (3, H, W) → (1, 3, H, W)
             masks_out = masks_out[np.newaxis, ...]
+            scores = scores[np.newaxis, ...]
 
         results: list[np.ndarray] = []
         for i in range(len(bboxes_xyxy)):
             if i < masks_out.shape[0]:
-                # shape (1, H, W) → squeeze → (H, W), convert bool→uint8
-                mask = masks_out[i, 0].astype(np.uint8)
+                # Pick the mask with the highest iou_prediction score
+                best_idx = int(scores[i].argmax())
+                mask = masks_out[i, best_idx].astype(np.uint8)
             else:
-                # SAM 2 returned fewer masks than boxes — fill with zeros
                 logger.warning(
                     "SAM2Segmentor: SAM2 returned %d masks for %d boxes "
                     "— filling slot %d with zeros",

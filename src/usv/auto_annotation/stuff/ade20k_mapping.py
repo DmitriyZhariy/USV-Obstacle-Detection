@@ -15,11 +15,29 @@ from __future__ import annotations
 # class_id is the unique integer from configs/auto_annotation.yaml labels[].id
 # z_order  is from configs/auto_annotation.yaml labels[].z_order
 ADE20K_TO_PROJECT: dict[int, tuple[str, int, int]] = {
-    21: ("Water",   0,  0),   # water        - Water   (id=0, z=0)
-    2:  ("Sky",     1,  1),   # sky          - Sky     (id=1, z=1)
-    13: ("Land",    2,  5),   # earth/ground - Land    (id=2, z=5)
-    1:  ("Land",    2,  5),   # building     - Land    (conservative fallback; annotator promotes to Pier)
-    61: ("Bridge",  4, 10),   # bridge       - Bridge  (id=4, z=10)
+    # Water
+    21: ("Water",  0,  0),   # water
+    26: ("Water",  0,  0),   # sea
+    60: ("Water",  0,  0),   # river
+    128: ("Water",  0,  0),   # lake
+    46: ("Water",  0,  0),   # sand
+
+    # Sky
+    2:  ("Sky",    1,  1),   # sky
+
+    # Land
+    13: ("Land",   2,  5),   # earth
+    4:  ("Land",   2,  5),   # tree
+    9:  ("Land",   2,  5),   # grass
+    1:  ("Land",   2,  5),   # building
+    16: ("Land",   2,  5),   # mountain
+    # 140: ("Land",   2,  5),  # pier (станет Pier после ручной разметки)
+
+    # Bridge
+    61: ("Bridge", 4, 10),   # bridge
+
+    # Pier
+    140: ("Pier", 3, 10),  # pier
 }
 # NOTE: Pier (id=3, z=10) is NOT auto-generated - it requires human context
 # to distinguish from building/Land. Annotators promote Land-Pier manually.
