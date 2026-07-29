@@ -15,14 +15,14 @@ Florence-2 + SAM2 pipeline for longer clips.
 The pipeline detects objects, produces masks, creates temporal tracks, and
 exports draft annotations.
 
-![Automatic pre-annotation example](assets/auto-annotation_example.gif)
+![Automatic pre-annotation example](assets/auto_annotation/auto-annotation_example.gif)
 
 ### Manual annotation review
 
 Generated annotations are imported into CVAT and corrected by an annotator
 before they are used as ground-truth data.
 
-![Manual annotation example](assets/manual_annotation_example.gif)
+![Manual annotation example](assets/auto_annotation/manual_annotation_example.gif)
 
 ## Pipeline modes
 

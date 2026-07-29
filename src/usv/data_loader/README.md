@@ -259,17 +259,17 @@ The first collage shows frames sampled uniformly from source recordings by `extr
 
 **Sampled frames before selection**
 
-![Sampled frames before selection](assets/raw_image_examples.png)
+![Sampled frames before selection](assets/data_collection/raw_image_examples.png)
 
 **Selected keyframes**
 
-![Selected keyframes](assets/processed_image_examples.png)
+![Selected keyframes](assets/data_collection/processed_image_examples.png)
 
 ### Generated clip
 
 `generate_sequences.py` creates short non-overlapping frame sequences centered around selected keyframes. The GIF below shows one generated clip.
 
-![Example generated clip](assets/clip_example.gif)
+![Example generated clip](assets/data_collection/clip_example.gif)
 
 After generating clips, run `intersection_test.py` to verify that consecutive clips from the same source video do not overlap:
 
